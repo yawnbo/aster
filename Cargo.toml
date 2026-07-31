@@ -1,0 +1,24 @@
+[package]
+name = "aster"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Conservative, history-first shell completion"
+repository = "https://github.com/yawnbo/aster"
+
+[dependencies]
+anyhow = "1.0.103"
+clap = { version = "4.6.1", features = ["derive"] }
+fs2 = "0.4.3"
+libc = "0.2.177"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+toml = "0.9.5"
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[profile.release]
+lto = "thin"
+strip = true

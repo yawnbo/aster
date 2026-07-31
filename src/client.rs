@@ -1,0 +1,109 @@
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
+
+use crate::config::Paths;
+use crate::protocol::{Request, RequestEnvelope, Response};
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const IO_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
+
+pub fn request(paths: &Paths, request: Request) -> Result<Response> {
+    if request_once(paths, Request::Ping).is_err() {
+        start_daemon(paths)?;
+        wait_for_daemon(paths)?;
+    }
+    request_once(paths, request)
+}
+
+pub fn request_idempotent(paths: &Paths, request: Request) -> Result<Response> {
+    match request_once(paths, request.clone()) {
+        Ok(response) => Ok(response),
+        Err(_) => {
+            if request_once(paths, Request::Ping).is_err() {
+                start_daemon(paths)?;
+                wait_for_daemon(paths)?;
+            }
+            request_once(paths, request)
+        }
+    }
+}
+
+pub fn request_once(paths: &Paths, request: Request) -> Result<Response> {
+    let mut stream = UnixStream::connect(&paths.socket_file)
+        .with_context(|| format!("failed to connect to {}", paths.socket_file.display()))?;
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+
+    let envelope = RequestEnvelope::new(request);
+    serde_json::to_writer(&mut stream, &envelope)?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut line = String::new();
+    BufReader::new(stream)
+        .take(MAX_RESPONSE_BYTES + 1)
+        .read_line(&mut line)?;
+    if line.len() as u64 > MAX_RESPONSE_BYTES {
+        bail!("daemon response exceeds 1 MiB");
+    }
+    if line.is_empty() {
+        bail!("daemon closed the connection without a response");
+    }
+    serde_json::from_str(&line).context("daemon returned an invalid response")
+}
+
+fn start_daemon(paths: &Paths) -> Result<()> {
+    paths.ensure_directories()?;
+    let executable = std::env::current_exe().context("failed to locate aster executable")?;
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(paths.state_dir.join("daemon.log"))?;
+    let error_log = log.try_clone()?;
+
+    let mut command = Command::new(executable);
+    command
+        .arg("daemon")
+        .current_dir(&paths.state_dir)
+        .env("ASTER_CONFIG", &paths.config_file)
+        .env("ASTER_STATE_DIR", &paths.state_dir)
+        .env("ASTER_SOCKET", &paths.socket_file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(error_log));
+
+    // A new session keeps the shared daemon alive when the shell, tmux client,
+    // or SSH connection that first requested it exits.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn().context("failed to start aster daemon")?;
+    Ok(())
+}
+
+fn wait_for_daemon(paths: &Paths) -> Result<()> {
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Ok(Response::Pong { .. }) = request_once(paths, Request::Ping) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    bail!(
+        "aster daemon did not become ready at {}",
+        paths.socket_file.display()
+    )
+}
