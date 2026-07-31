@@ -107,7 +107,7 @@ fn history_description(uses: usize, same_cwd: bool) -> String {
     match (uses, same_cwd) {
         (1, true) => "used here".to_owned(),
         (1, false) => "used once".to_owned(),
-        (uses, true) => format!("used {uses}x · here"),
+        (uses, true) => format!("used {uses}x, here"),
         (uses, false) => format!("used {uses}x"),
     }
 }
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn describes_history_usage_and_directory() {
         assert_eq!(history_description(1, true), "used here");
-        assert_eq!(history_description(3, true), "used 3x · here");
+        assert_eq!(history_description(3, true), "used 3x, here");
         assert_eq!(history_description(2, false), "used 2x");
     }
 

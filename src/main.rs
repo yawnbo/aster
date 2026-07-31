@@ -291,6 +291,10 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
   typeset -g _ASTER_NATIVE_REQUEST_TICKS=0
   typeset -g _ASTER_NATIVE_START_TICKS=0
   typeset -g _ASTER_NATIVE_REQUESTED=0
+  typeset -g _ASTER_UTF8_UI=0
+  typeset -g _ASTER_CHARMAP="${(U)$(command locale charmap 2>/dev/null)}"
+  [[ "$_ASTER_CHARMAP" == *UTF-8* || "$_ASTER_CHARMAP" == *UTF8* ]] && _ASTER_UTF8_UI=1
+  unset _ASTER_CHARMAP
   typeset -ga _ASTER_MENU_ACCEPTS=()
   typeset -ga _ASTER_MENU_DISPLAYS=()
   typeset -ga _ASTER_MENU_DESCRIPTIONS=()
@@ -405,6 +409,23 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
 
   _aster_menu_render() {
     local index display description kind icon marker row top bottom fill ghost=""
+    local horizontal="─" vertical="│" top_left="╭" top_right="╮"
+    local bottom_left="╰" bottom_right="╯" separator="·" ellipsis="…"
+    local selected_marker="▶ " history_icon="↺" command_icon="❯" native_icon="⇥"
+    if (( ! _ASTER_UTF8_UI )); then
+      horizontal="-"
+      vertical="|"
+      top_left="+"
+      top_right="+"
+      bottom_left="+"
+      bottom_right="+"
+      separator="|"
+      ellipsis="~"
+      selected_marker="> "
+      history_icon="H"
+      command_icon="$"
+      native_icon="T"
+    fi
     local input="${BUFFER:-$_ASTER_MENU_REQUEST_BUFFER}"
     local cursor_position=$CURSOR
     if [[ -z "$BUFFER" && -n "$_ASTER_MENU_REQUEST_BUFFER" ]]; then
@@ -438,16 +459,16 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
     local description_width=24
     (( box_width < 64 )) && description_width=16
     local title_width=$(( box_width - description_width - 9 ))
-    local top_prefix="╭─"
+    local top_prefix="${top_left}${horizontal}"
     local count=" $_ASTER_MENU_INDEX/$total "
     printf -v fill '%*s' "$(( box_width - ${#top_prefix} - ${#count} - 1 ))" ""
-    fill="${fill// /─}"
-    top="${top_prefix}${fill}${count}╮"
-    local footer=" Ctrl-N/K move · __ASTER_COMPLETION_KEY_LABEL__ accept "
-    local bottom_prefix="╰─${footer}"
+    fill="${fill// /$horizontal}"
+    top="${top_prefix}${fill}${count}${top_right}"
+    local footer=" Ctrl-N/K move ${separator} __ASTER_COMPLETION_KEY_LABEL__ accept "
+    local bottom_prefix="${bottom_left}${horizontal}${footer}"
     printf -v fill '%*s' "$(( box_width - ${#bottom_prefix} - 1 ))" ""
-    fill="${fill// /─}"
-    bottom="${bottom_prefix}${fill}╯"
+    fill="${fill// /$horizontal}"
+    bottom="${bottom_prefix}${fill}${bottom_right}"
 
     local indent=$(( __ASTER_UI_PROMPT_OFFSET__ + cursor_position ))
     local max_indent=$(( ${COLUMNS:-80} - box_width - 1 ))
@@ -475,24 +496,24 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
     for (( index = _ASTER_MENU_START; index <= end; index++ )); do
       display="$_ASTER_MENU_DISPLAYS[$index]"
       if (( ${#display} > title_width )); then
-        display="${display[1,$(( title_width - 1 ))]}…"
+        display="${display[1,$(( title_width - 1 ))]}${ellipsis}"
       fi
       description="$_ASTER_MENU_DESCRIPTIONS[$index]"
       if (( ${#description} > description_width )); then
-        description="${description[1,$(( description_width - 1 ))]}…"
+        description="${description[1,$(( description_width - 1 ))]}${ellipsis}"
       fi
       kind="$_ASTER_MENU_KINDS[$index]"
       case "$kind" in
-        history) icon="↺" ;;
-        command) icon="❯" ;;
-        native) icon="⇥" ;;
-        *) icon="·" ;;
+        history) icon="$history_icon" ;;
+        command) icon="$command_icon" ;;
+        native) icon="$native_icon" ;;
+        *) icon="." ;;
       esac
       marker="  "
-      (( index == _ASTER_MENU_INDEX )) && marker="▶ "
-      printf -v row '│ %s%s %-*s %-*s │' \
-        "$marker" "$icon" "$title_width" "$display" \
-        "$description_width" "$description"
+      (( index == _ASTER_MENU_INDEX )) && marker="$selected_marker"
+      printf -v row '%s %s%s %-*s %-*s %s' \
+        "$vertical" "$marker" "$icon" "$title_width" "$display" \
+        "$description_width" "$description" "$vertical"
 
       line_start=$(( ${#input} + ${#POSTDISPLAY} + 1 + indent ))
       POSTDISPLAY+=$'\n'"${padding}${row}"

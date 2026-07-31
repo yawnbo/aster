@@ -50,7 +50,8 @@ The integration:
 - Delegates normal Tab to its previous native Zsh widget after clearing stale
   Aster display state.
 - Captures append-safe candidates from the configured Zsh completion system in
-  a forked completion context and blends them into Aster's menu.
+  a forked completion context after about 120 ms idle and blends them into
+  Aster's menu without blocking input.
 - Shows ranked candidates automatically as the command buffer changes.
 - Renders a bordered, color-highlighted menu and selected-candidate ghost text
   as part of ZLE's multiline display.
@@ -75,6 +76,8 @@ Tab, which still delegates to Zsh unchanged.
 
 The same setup works inside tmux and on SSH hosts. Each remote host runs its own
 daemon and keeps its own local history; tmux panes on that host share it.
+Aster uses its Unicode UI when `locale charmap` reports UTF-8 and automatically
+falls back to ASCII borders and markers otherwise.
 
 ## Conservative Acceptance
 
