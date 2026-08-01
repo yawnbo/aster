@@ -164,7 +164,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
-    thread::sleep(Duration::from_millis(50));
+    thread::sleep(Duration::from_millis(200));
     let binding_command = format!(
         "{{ bindkey '^M'; bindkey '^I'; bindkey '^[[Z'; }} > {}",
         shell_quote(binding_file.to_str().unwrap())
@@ -219,7 +219,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
-    thread::sleep(Duration::from_millis(50));
+    thread::sleep(Duration::from_millis(200));
 
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0"])
@@ -646,6 +646,54 @@ PROMPT='%# '
         !ascii_capture.contains("<e2>") && !ascii_capture.contains('╭'),
         "non-UTF-8 menu still contained Unicode rendering:\n{ascii_capture}"
     );
+    assert_eq!(cursor_x(&server, "test:ascii.0"), 6);
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:ascii.0", "BSpace"])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(cursor_x(&server, "test:ascii.0"), 5);
+    Command::new("tmux")
+        .args([
+            "-L",
+            &server,
+            "send-keys",
+            "-t",
+            "test:ascii.0",
+            "C-x",
+            "C-d",
+        ])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(20));
+    let ascii_state = fs::read_to_string(&state_dump).unwrap();
+    let ascii_fields: Vec<_> = ascii_state.trim_end().split('|').collect();
+    assert_eq!(ascii_fields[3], "ast");
+    Command::new("tmux")
+        .args([
+            "-L",
+            &server,
+            "resize-window",
+            "-t",
+            "test:ascii",
+            "-x",
+            "20",
+            "-y",
+            "15",
+        ])
+        .status()
+        .unwrap();
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:ascii.0", "C-l"])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(100));
+    let narrow_capture = capture_target(&server, "test:ascii.0", false);
+    assert!(
+        narrow_capture.contains("aster") && !narrow_capture.contains("+-"),
+        "narrow terminal did not retain a compact suggestion:\n{narrow_capture}"
+    );
+    assert_eq!(cursor_x(&server, "test:ascii.0"), 5);
 }
 
 fn dump_zle_state(server: &str) {
@@ -658,6 +706,26 @@ fn dump_zle_state(server: &str) {
 
 fn capture_pane(server: &str, include_escape_sequences: bool) -> String {
     capture_target(server, "test:0.0", include_escape_sequences)
+}
+
+fn cursor_x(server: &str, target: &str) -> usize {
+    let output = Command::new("tmux")
+        .args([
+            "-L",
+            server,
+            "display-message",
+            "-p",
+            "-t",
+            target,
+            "#{cursor_x}",
+        ])
+        .output()
+        .unwrap();
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
 }
 
 fn capture_target(server: &str, target: &str, include_escape_sequences: bool) -> String {

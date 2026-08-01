@@ -650,14 +650,51 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     if [[ -z "$BUFFER" && -n "$_ASTER_MENU_REQUEST_BUFFER" ]]; then
       cursor_position=$_ASTER_MENU_REQUEST_CURSOR
     fi
+    local total=${#_ASTER_MENU_DISPLAYS}
+    local selected="$_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]"
+    if (( ! _ASTER_FUZZY_ACTIVE && cursor_position == ${#input} )) &&
+       [[ -n "$input" && "$selected" == "$input"* ]]; then
+      ghost="${selected[${#input}+1,-1]}"
+    fi
+    region_highlight=( "${(@)region_highlight:#*memo=aster*}" )
+    (( _ASTER_FUZZY_ACTIVE )) && POSTDISPLAY="$virtual_query" || POSTDISPLAY="$ghost"
+    local buffer_end=${#input}
+    if [[ -n "$virtual_query" ]]; then
+      region_highlight+=("$buffer_end $(( buffer_end + ${#virtual_query} )) fg=__ASTER_UI_ACCENT__,bold memo=aster")
+    elif [[ -n "$ghost" ]]; then
+      region_highlight+=("$buffer_end $(( buffer_end + ${#ghost} )) fg=__ASTER_UI_GHOST__ memo=aster")
+    fi
     local box_width=$(( ${COLUMNS:-80} - 2 ))
     (( box_width > __ASTER_UI_MENU_WIDTH__ )) && box_width=__ASTER_UI_MENU_WIDTH__
     if (( box_width < 40 )); then
-      POSTDISPLAY="$virtual_query"
+      _aster_preview_clear
+      local compact_width=$(( ${COLUMNS:-80} - 1 ))
+      if (( total > 0 && compact_width >= 8 )); then
+        local compact_indent=$(( __ASTER_UI_PROMPT_OFFSET__ + cursor_position ))
+        local compact_max_indent=$(( ${COLUMNS:-80} - compact_width - 1 ))
+        (( compact_indent > compact_max_indent )) && compact_indent=$compact_max_indent
+        (( compact_indent < 0 )) && compact_indent=0
+        local compact_padding compact_display="$selected"
+        printf -v compact_padding '%*s' "$compact_indent" ""
+        (( ${#compact_display} > compact_width - 4 )) && \
+          compact_display="${compact_display[1,$(( compact_width - 5 ))]}${ellipsis}"
+        kind="$_ASTER_MENU_KINDS[$_ASTER_MENU_INDEX]"
+        case "$kind" in
+          history) icon="$history_icon" ;;
+          command) icon="$command_icon" ;;
+          native) icon="$native_icon" ;;
+          *) icon="." ;;
+        esac
+        row="${selected_marker}${icon} ${compact_display}"
+        local compact_start=$(( ${#input} + ${#POSTDISPLAY} + 1 + compact_indent ))
+        POSTDISPLAY+=$'\n'"${compact_padding}${row}"
+        region_highlight+=("$compact_start $(( compact_start + ${#row} )) bg=__ASTER_UI_SELECTED_BACKGROUND__,fg=__ASTER_UI_SELECTED_TEXT__ memo=aster")
+        region_highlight+=("$compact_start $(( compact_start + 1 )) bg=__ASTER_UI_SELECTED_BACKGROUND__,fg=__ASTER_UI_ACCENT__,bold memo=aster")
+      fi
+      _ASTER_MENU_OWNS_DISPLAY=1
       return 0
     fi
 
-    local total=${#_ASTER_MENU_DISPLAYS}
     if (( total == 0 )); then
       region_highlight=( "${(@)region_highlight:#*memo=aster*}" )
       POSTDISPLAY="$virtual_query"
@@ -707,21 +744,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     local padding
     printf -v padding '%*s' "$indent" ""
 
-    local selected="$_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]"
     _aster_preview_consider
-    if (( ! _ASTER_FUZZY_ACTIVE && cursor_position == ${#input} )) &&
-       [[ -n "$input" && "$selected" == "$input"* ]]; then
-      ghost="${selected[${#input}+1,-1]}"
-    fi
-
-    region_highlight=( "${(@)region_highlight:#*memo=aster*}" )
-    (( _ASTER_FUZZY_ACTIVE )) && POSTDISPLAY="$virtual_query" || POSTDISPLAY="$ghost"
-    local buffer_end=${#input}
-    if [[ -n "$virtual_query" ]]; then
-      region_highlight+=("$buffer_end $(( buffer_end + ${#virtual_query} )) fg=__ASTER_UI_ACCENT__,bold memo=aster")
-    elif [[ -n "$ghost" ]]; then
-      region_highlight+=("$buffer_end $(( buffer_end + ${#ghost} )) fg=__ASTER_UI_GHOST__ memo=aster")
-    fi
 
     local line_start=$(( ${#input} + ${#POSTDISPLAY} + 1 + indent ))
     POSTDISPLAY+=$'\n'"${padding}${top}"
