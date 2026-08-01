@@ -1,10 +1,23 @@
 [package]
-name = "aster"
+name = "aster-completion"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Conservative, history-first shell completion"
+description = "Natural shell completion"
 repository = "https://github.com/yawnbo/aster"
+homepage = "https://github.com/yawnbo/aster"
+license = "MIT"
+readme = "README.md"
+keywords = ["shell", "completion", "zsh", "fzf", "history"]
+categories = ["command-line-utilities"]
+
+[lib]
+name = "aster"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aster"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.103"

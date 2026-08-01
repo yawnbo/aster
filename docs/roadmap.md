@@ -50,3 +50,5 @@ when it cannot justify the candidate kind.
 - Persisting command output or environment values.
 - Requiring users to source completion code for every binary.
 - Replacing native shell completion when Aster has no high-confidence result.
+- Add PTY-owned Kitty image previews with explicit capability negotiation,
+  image-ID cleanup, tmux passthrough, and sandboxed first-page PDF rasterization.

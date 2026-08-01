@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequestEnvelope {
@@ -33,6 +33,11 @@ pub enum Request {
     Complete {
         buffer: String,
         cursor_byte: usize,
+        cwd: String,
+        limit: Option<usize>,
+    },
+    Fuzzy {
+        query: String,
         cwd: String,
         limit: Option<usize>,
     },

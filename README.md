@@ -1,12 +1,12 @@
 # Aster
 
-Aster is a conservative, history-first shell completion system. It would rather
+Aster is a natural, history-first shell completion system. It would rather
 show nothing than offer a completion it cannot justify.
 
 The project is in early development. The current vertical slice provides a
 shared local daemon, SQLite-backed command history, Zsh history import, and
 an inline completion menu, ghost text, command discovery, lazy descriptions,
-native Zsh candidates, and segment-by-segment acceptance.
+native Zsh candidates, full acceptance, and segment-by-segment Tab completion.
 
 ## Principles
 
@@ -14,7 +14,7 @@ native Zsh candidates, and segment-by-segment acceptance.
 - Candidate providers are ordered tiers; lower tiers fill unused menu capacity
   but never outrank higher-confidence results.
 - The menu appears while typing and highlights the highest-ranked candidate.
-- Ctrl-Space accepts one useful segment from that candidate by default.
+- Ctrl-Space accepts the entire candidate; Tab accepts one useful segment.
 - No per-command shell completion scripts are required.
 - Every host has one shared daemon and one history database.
 - tmux panes and concurrent SSH shells remain lightweight clients.
@@ -27,8 +27,14 @@ cargo build --release
 cargo install --path .
 ```
 
+Or install the published package while keeping the executable name `aster`:
+
+```sh
+cargo install aster-completion
+```
+
 Aster currently targets Unix systems because its shared transport is an
-owner-private Unix socket.
+owner-private Unix socket. Inline fuzzy mode requires `fzf` on the host.
 
 ## Zsh Setup
 
@@ -47,20 +53,28 @@ The integration:
   the previous import.
 - Records submitted foreground commands and the shell status reported afterward.
 - Starts the per-host daemon automatically.
-- Delegates normal Tab to its previous native Zsh widget after clearing stale
-  Aster display state.
+- Uses Tab to accept the shortest next word or path segment from an open Aster
+  suggestion; with no open suggestion, it delegates to the previous Zsh widget.
+- Uses Shift-Tab to move upward through suggestions without entering a modal
+  editing state; letters and Backspace continue editing normally.
+- Consumes a second consecutive Space to enter inline fuzzy mode over shared
+  history and installed commands. Escape exits and preserves the first Space.
 - Captures append-safe candidates from the configured Zsh completion system in
-  a forked completion context after about 120 ms idle and blends them into
+  a forked completion context after about 30-60 ms idle and blends them into
   Aster's menu without blocking input.
 - Shows ranked candidates automatically as the command buffer changes.
 - Renders a bordered, color-highlighted menu and selected-candidate ghost text
   as part of ZLE's multiline display.
-- Uses Ctrl-Space to accept the highlighted candidate and preserves its previous
-  binding as the fallback when Aster has no candidate.
+- Adds a lazy preview box at 100 columns or wider only when useful content is
+  available. History-only and generic rows stay compact; command details reuse
+  the existing asynchronous description workers, and selected native text files
+  are read through a bounded, sanitized background helper.
+- Uses Ctrl-Space to accept the entire highlighted candidate and preserves its
+  previous binding as the fallback when Aster has no candidate.
 - Uses Ctrl-N and Ctrl-K to move through an open menu; outside the menu their
   prior widgets remain active.
-- Accepts the selected candidate only with Ctrl-Space by default; Enter remains
-  the shell's untouched command-submission binding.
+- Accepts the full suggestion with Ctrl-Space, or the shortest next segment with
+  Tab; Enter remains the shell's untouched command-submission binding.
 - Labels the tmux pane `aster` only while Zsh is idle, then switches the pane
   title to the foreground command until the prompt returns.
 
@@ -72,12 +86,16 @@ native matches appear before generic command inventory, and duplicate displays
 are removed. Aster only imports matches that are safe literal appends at the end
 of the buffer. Quoted replacements, mid-word edits, removable suffixes, and
 completion functions that bypass `compadd` remain available through ordinary
-Tab, which still delegates to Zsh unchanged.
+Tab whenever Aster has no open suggestion.
 
 The same setup works inside tmux and on SSH hosts. Each remote host runs its own
 daemon and keeps its own local history; tmux panes on that host share it.
 Aster uses its Unicode UI when `locale charmap` reports UTF-8 and automatically
 falls back to ASCII borders and markers otherwise.
+
+Image and PDF candidates currently show bounded metadata rather than graphics.
+Kitty image transmission needs terminal-owned image IDs and cleanup that ZLE's
+`POSTDISPLAY` model cannot provide safely; it is tracked for the future PTY UI.
 
 ## Conservative Acceptance
 
@@ -93,16 +111,16 @@ and the current buffer:
 cd ~/d
 ```
 
-pressing Ctrl-Space on the automatically highlighted candidate inserts only:
+pressing Tab on the automatically highlighted candidate inserts only:
 
 ```text
 ev/
 ```
 
-Aster then queries again from the new buffer. The initial boundary scanner is
+Aster then queries again from the new buffer. Pressing Ctrl-Space instead inserts
+the complete `ev/gitrepos/aster` remainder. The initial Tab boundary scanner is
 deliberately small and recognizes path and word delimiters; a shell-aware parser
-will replace it before mid-line editing is enabled. Set
-`completion.accept = "full"` if full-line acceptance is preferred.
+will replace it before mid-line editing is enabled.
 
 ## Commands
 
@@ -126,7 +144,7 @@ The default configuration is written by `aster init zsh`:
 [completion]
 max_candidates = 8
 key = "ctrl-space"
-accept = "segment"
+accept = "full"
 
 [history]
 ignore_leading_space = true
@@ -146,9 +164,9 @@ selected_text = "15"
 selected_source = "0"
 ```
 
-`completion.key` also accepts `shift-tab`, `tab`, and Ctrl-letter names such as
-`ctrl-i` or `ctrl-x`. Ctrl-J, Ctrl-K, Ctrl-M, and Ctrl-N are reserved by the
-menu integration. The generated binding is refreshed when a new shell starts.
+`completion.key` also accepts Ctrl-letter names such as `ctrl-x`. Ctrl-I (Tab),
+Ctrl-J, Ctrl-K, Ctrl-M, and Ctrl-N are reserved by the menu integration. The
+generated binding is refreshed when a new shell starts.
 UI colors accept ANSI palette indexes from `0` through `255` or exact `#RRGGBB`
 values. ANSI indexes follow the active terminal theme. `prompt_offset` is the
 visual width of the final prompt line before editable text. The menu follows the

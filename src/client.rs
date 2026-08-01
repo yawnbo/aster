@@ -9,22 +9,32 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use crate::config::Paths;
-use crate::protocol::{Request, RequestEnvelope, Response};
+use crate::protocol::{PROTOCOL_VERSION, Request, RequestEnvelope, Response};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
 pub fn request(paths: &Paths, request: Request) -> Result<Response> {
-    if request_once(paths, Request::Ping).is_err() {
-        start_daemon(paths)?;
-        wait_for_daemon(paths)?;
+    match request_once(paths, Request::Ping) {
+        Ok(Response::Pong { .. }) => {}
+        Ok(Response::Error { message }) if message.contains("unsupported protocol version") => {
+            replace_previous_daemon(paths)?;
+        }
+        _ => {
+            start_daemon(paths)?;
+            wait_for_daemon(paths)?;
+        }
     }
     request_once(paths, request)
 }
 
 pub fn request_idempotent(paths: &Paths, request: Request) -> Result<Response> {
     match request_once(paths, request.clone()) {
+        Ok(Response::Error { message }) if message.contains("unsupported protocol version") => {
+            replace_previous_daemon(paths)?;
+            request_once(paths, request)
+        }
         Ok(response) => Ok(response),
         Err(_) => {
             if request_once(paths, Request::Ping).is_err() {
@@ -37,12 +47,16 @@ pub fn request_idempotent(paths: &Paths, request: Request) -> Result<Response> {
 }
 
 pub fn request_once(paths: &Paths, request: Request) -> Result<Response> {
+    request_once_version(paths, request, PROTOCOL_VERSION)
+}
+
+fn request_once_version(paths: &Paths, request: Request, version: u32) -> Result<Response> {
     let mut stream = UnixStream::connect(&paths.socket_file)
         .with_context(|| format!("failed to connect to {}", paths.socket_file.display()))?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
 
-    let envelope = RequestEnvelope::new(request);
+    let envelope = RequestEnvelope { version, request };
     serde_json::to_writer(&mut stream, &envelope)?;
     stream.write_all(b"\n")?;
     stream.flush()?;
@@ -58,6 +72,18 @@ pub fn request_once(paths: &Paths, request: Request) -> Result<Response> {
         bail!("daemon closed the connection without a response");
     }
     serde_json::from_str(&line).context("daemon returned an invalid response")
+}
+
+fn replace_previous_daemon(paths: &Paths) -> Result<()> {
+    if PROTOCOL_VERSION > 0 {
+        let _ = request_once_version(paths, Request::Shutdown, PROTOCOL_VERSION - 1);
+    }
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    while Instant::now() < deadline && UnixStream::connect(&paths.socket_file).is_ok() {
+        thread::sleep(Duration::from_millis(20));
+    }
+    start_daemon(paths)?;
+    wait_for_daemon(paths)
 }
 
 fn start_daemon(paths: &Paths) -> Result<()> {

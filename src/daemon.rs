@@ -247,6 +247,20 @@ fn dispatch(
             )?;
             Ok(Response::Completion(completion))
         }
+        Request::Fuzzy { query, cwd, limit } => {
+            if cwd.len() > MAX_PATH_BYTES {
+                bail!("working directory is too long");
+            }
+            let completion = engine::fuzzy(
+                &store.lock().expect("store lock poisoned"),
+                commands,
+                &query,
+                &cwd,
+                limit,
+                settings,
+            )?;
+            Ok(Response::Completion(completion))
+        }
         Request::ImportHistory { path } => {
             if path.len() > MAX_PATH_BYTES {
                 bail!("history path is too long");

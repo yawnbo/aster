@@ -1,3 +1,4 @@
+use std::fs::{self, File};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{io, io::Read, io::Write};
@@ -47,6 +48,24 @@ enum Command {
         limit: Option<usize>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
+    },
+    /// Fuzzy-rank shared history and installed commands with fzf.
+    Fuzzy {
+        #[arg(long, default_value = "")]
+        query: String,
+        #[arg(long)]
+        cwd: PathBuf,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        format: OutputFormat,
+    },
+    /// Emit a bounded, sanitized preview for a local regular file.
+    PreviewFile {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        cwd: PathBuf,
     },
     /// Import an existing Zsh history file into shared state.
     ImportHistory {
@@ -129,52 +148,25 @@ fn run() -> Result<()> {
                     limit,
                 },
             )?;
-            match response {
-                Response::Completion(completion) => match format {
-                    OutputFormat::Json => println!("{}", serde_json::to_string(&completion)?),
-                    OutputFormat::Insert => {
-                        if let Some(candidate) = completion.candidates.first() {
-                            print!("{}", candidate.accept_text);
-                        }
-                    }
-                    OutputFormat::Zsh | OutputFormat::ZshV2 => {
-                        let stdout = io::stdout();
-                        let mut output = stdout.lock();
-                        for candidate in completion.candidates {
-                            let source = match candidate.source {
-                                aster::protocol::CandidateSource::History => "history",
-                                aster::protocol::CandidateSource::Command => "command",
-                            };
-                            let kind = match candidate.kind {
-                                aster::protocol::CandidateKind::History => "history",
-                                aster::protocol::CandidateKind::Command => "command",
-                            };
-                            for field in [
-                                candidate.accept_text.as_str(),
-                                candidate.display.as_str(),
-                                candidate.description.as_str(),
-                                kind,
-                                source,
-                            ] {
-                                output.write_all(field.as_bytes())?;
-                                output.write_all(&[0])?;
-                            }
-                            if matches!(format, OutputFormat::ZshV2) {
-                                output.write_all(if candidate.description_pending {
-                                    b"true"
-                                } else {
-                                    b"false"
-                                })?;
-                                output.write_all(&[0])?;
-                            }
-                        }
-                    }
-                },
-                Response::Error { message } => bail!(message),
-                response => bail!("unexpected daemon response: {response:?}"),
-            }
-            Ok(())
+            write_completion(response, format)
         }
+        Command::Fuzzy {
+            query,
+            cwd,
+            limit,
+            format,
+        } => {
+            let response = client::request_idempotent(
+                &paths,
+                Request::Fuzzy {
+                    query,
+                    cwd: cwd.to_string_lossy().into_owned(),
+                    limit,
+                },
+            )?;
+            write_completion(response, format)
+        }
+        Command::PreviewFile { path, cwd } => write_file_preview(path, cwd),
         Command::ImportHistory { file } => {
             let file = file
                 .canonicalize()
@@ -210,6 +202,70 @@ fn run() -> Result<()> {
     }
 }
 
+fn write_file_preview(path: PathBuf, cwd: PathBuf) -> Result<()> {
+    let path = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    let metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("failed to inspect preview target {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("preview target is not a regular non-symlink file");
+    }
+    let mut bytes = Vec::new();
+    File::open(&path)?.take(16 * 1024).read_to_end(&mut bytes)?;
+    let kind = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "PNG image"
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        "JPEG image"
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "GIF image"
+    } else if bytes.starts_with(b"%PDF-") {
+        "PDF document"
+    } else if bytes.contains(&0) {
+        "binary file"
+    } else {
+        "text file"
+    };
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    for line in [
+        format!("Type: {kind}"),
+        format!("Size: {} bytes", metadata.len()),
+    ] {
+        output.write_all(line.as_bytes())?;
+        output.write_all(&[0])?;
+    }
+    if kind == "text file" {
+        let text = String::from_utf8_lossy(&bytes);
+        for source in text.lines().take(8) {
+            let line: String = source
+                .chars()
+                .take(160)
+                .map(|character| {
+                    if character == '\t' {
+                        ' '
+                    } else if character.is_ascii() && !character.is_control() {
+                        character
+                    } else {
+                        '?'
+                    }
+                })
+                .collect();
+            output.write_all(line.as_bytes())?;
+            output.write_all(&[0])?;
+        }
+    } else if matches!(
+        kind,
+        "PNG image" | "JPEG image" | "GIF image" | "PDF document"
+    ) {
+        output.write_all(b"Graphical preview requires the future PTY frontend")?;
+        output.write_all(&[0])?;
+    }
+    Ok(())
+}
+
 fn doctor(paths: &Paths) -> Result<()> {
     Settings::load(&paths.config_file)?;
     let response = client::request(paths, Request::Ping)?;
@@ -221,6 +277,56 @@ fn doctor(paths: &Paths) -> Result<()> {
     println!("database: {}", paths.database_file.display());
     println!("socket: {}", paths.socket_file.display());
     println!("status: ready");
+    Ok(())
+}
+
+fn write_completion(response: Response, format: OutputFormat) -> Result<()> {
+    let Response::Completion(completion) = response else {
+        return match response {
+            Response::Error { message } => Err(anyhow::anyhow!(message)),
+            response => Err(anyhow::anyhow!("unexpected daemon response: {response:?}")),
+        };
+    };
+    match format {
+        OutputFormat::Json => println!("{}", serde_json::to_string(&completion)?),
+        OutputFormat::Insert => {
+            if let Some(candidate) = completion.candidates.first() {
+                print!("{}", candidate.accept_text);
+            }
+        }
+        OutputFormat::Zsh | OutputFormat::ZshV2 => {
+            let stdout = io::stdout();
+            let mut output = stdout.lock();
+            for candidate in completion.candidates {
+                let source = match candidate.source {
+                    aster::protocol::CandidateSource::History => "history",
+                    aster::protocol::CandidateSource::Command => "command",
+                };
+                let kind = match candidate.kind {
+                    aster::protocol::CandidateKind::History => "history",
+                    aster::protocol::CandidateKind::Command => "command",
+                };
+                for field in [
+                    candidate.insert_text.as_str(),
+                    candidate.display.as_str(),
+                    candidate.description.as_str(),
+                    kind,
+                    source,
+                ] {
+                    output.write_all(field.as_bytes())?;
+                    output.write_all(&[0])?;
+                }
+                if matches!(format, OutputFormat::ZshV2) {
+                    output.write_all(if candidate.description_pending {
+                        b"true"
+                    } else {
+                        b"false"
+                    })?;
+                    output.write_all(&[0])?;
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -267,7 +373,7 @@ fn zsh_integration(settings: &Settings) -> Result<String> {
     let max_visible = settings.ui.max_visible.to_string();
     let max_candidates = settings.completion.max_candidates.to_string();
     Ok(r#"# Aster shell integration
-if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] )); then
+if [[ -o interactive ]] && (( $+commands[aster] )); then
   typeset -g ASTER_ZSH_LOADED=1
   typeset -g _ASTER_COMMAND=""
   typeset -g _ASTER_COMMAND_CWD=""
@@ -284,6 +390,7 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
   typeset -g _ASTER_MENU_REFRESH_TICKS=0
   typeset -g _ASTER_MENU_RESTORE_DISPLAY=""
   typeset -g _ASTER_RESTORE_HIGHLIGHTS=0
+  typeset -g _ASTER_CAPTURE_FOREIGN_HIGHLIGHTS=0
   typeset -g _ASTER_MENU_TICK_FD=-1
   typeset -g _ASTER_HAS_ZSELECT=0
   typeset -g _ASTER_NATIVE_REQUEST_FD=-1
@@ -291,6 +398,18 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
   typeset -g _ASTER_NATIVE_REQUEST_TICKS=0
   typeset -g _ASTER_NATIVE_START_TICKS=0
   typeset -g _ASTER_NATIVE_REQUESTED=0
+  typeset -g _ASTER_IN_NATIVE_COMPLETION=0
+  typeset -g _ASTER_FUZZY_ACTIVE=0
+  typeset -g _ASTER_FUZZY_BASE=""
+  typeset -g _ASTER_FUZZY_QUERY=""
+  typeset -g _ASTER_FUZZY_KEYTIMEOUT=-1
+  typeset -g _ASTER_FUZZY_PREVIOUS_KEYMAP=""
+  typeset -g _ASTER_PREVIEW_FD=-1
+  typeset -g _ASTER_PREVIEW_PID=-1
+  typeset -g _ASTER_PREVIEW_TICKS=0
+  typeset -g _ASTER_PREVIEW_TARGET=""
+  typeset -g _ASTER_PREVIEW_PATH=""
+  typeset -ga _ASTER_PREVIEW_LINES=()
   typeset -g _ASTER_UTF8_UI=0
   typeset -g _ASTER_CHARMAP="${(U)$(command locale charmap 2>/dev/null)}"
   [[ "$_ASTER_CHARMAP" == *UTF-8* || "$_ASTER_CHARMAP" == *UTF8* ]] && _ASTER_UTF8_UI=1
@@ -366,6 +485,67 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
     _ASTER_NATIVE_START_TICKS=0
   }
 
+  _aster_preview_cancel() {
+    local fd="$_ASTER_PREVIEW_FD"
+    if (( fd >= 0 )); then
+      zle -F "$fd" 2>/dev/null
+      exec {fd}<&-
+    fi
+    (( _ASTER_PREVIEW_PID > 0 )) && kill "$_ASTER_PREVIEW_PID" 2>/dev/null
+    _ASTER_PREVIEW_FD=-1
+    _ASTER_PREVIEW_PID=-1
+    _ASTER_PREVIEW_TICKS=0
+  }
+
+  _aster_preview_clear() {
+    _aster_preview_cancel
+    _ASTER_PREVIEW_TARGET=""
+    _ASTER_PREVIEW_PATH=""
+    _ASTER_PREVIEW_LINES=()
+  }
+
+  _aster_preview_consider() {
+    local display source target path
+    if (( ${COLUMNS:-80} < 100 || ! _ASTER_MENU_ACTIVE )); then
+      _aster_preview_clear
+      return
+    fi
+    display="${_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}"
+    source="${_ASTER_MENU_SOURCES[$_ASTER_MENU_INDEX]}"
+    target="${source}:${display}"
+    [[ "$target" == "$_ASTER_PREVIEW_TARGET" ]] && return
+    _aster_preview_clear
+    _ASTER_PREVIEW_TARGET="$target"
+    if [[ "$source" == native ]]; then
+      path="${display##* }"
+      [[ -n "$path" ]] || return
+      _ASTER_PREVIEW_PATH="$path"
+    fi
+  }
+
+  _aster_preview_ready() {
+    local fd="$1" line
+    local -a lines
+    if (( fd != _ASTER_PREVIEW_FD )); then
+      zle -F "$fd" 2>/dev/null
+      exec {fd}<&-
+      return 0
+    fi
+    zle -F "$fd"
+    while IFS= read -r -u "$fd" -d '' line; do
+      lines+=("$line")
+      (( ${#lines} >= 10 )) && break
+    done
+    exec {fd}<&-
+    _ASTER_PREVIEW_FD=-1
+    _ASTER_PREVIEW_PID=-1
+    _ASTER_PREVIEW_TICKS=0
+    _ASTER_PREVIEW_PATH=""
+    (( ${#lines} )) && _ASTER_PREVIEW_LINES=("${lines[@]}") || \
+      _ASTER_PREVIEW_LINES=("Preview unavailable")
+    _aster_menu_publish
+  }
+
   _aster_menu_cancel_request() {
     _aster_menu_cancel_query
     _aster_native_cancel
@@ -379,6 +559,20 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
     _ASTER_NATIVE_START_TICKS=0
   }
 
+  _aster_fuzzy_reset() {
+    if (( _ASTER_FUZZY_ACTIVE && _ASTER_FUZZY_KEYTIMEOUT >= 0 )); then
+      KEYTIMEOUT=$_ASTER_FUZZY_KEYTIMEOUT
+    fi
+    if (( _ASTER_FUZZY_ACTIVE )) && [[ -n "$_ASTER_FUZZY_PREVIOUS_KEYMAP" ]]; then
+      zle -K "$_ASTER_FUZZY_PREVIOUS_KEYMAP" 2>/dev/null
+    fi
+    _ASTER_FUZZY_ACTIVE=0
+    _ASTER_FUZZY_BASE=""
+    _ASTER_FUZZY_QUERY=""
+    _ASTER_FUZZY_KEYTIMEOUT=-1
+    _ASTER_FUZZY_PREVIOUS_KEYMAP=""
+  }
+
   _aster_menu_clear() {
     local preserve_buffer="${1:-0}"
     _aster_menu_cancel_request
@@ -386,6 +580,9 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
     _ASTER_MENU_INDEX=1
     _ASTER_MENU_START=1
     _ASTER_RESTORE_HIGHLIGHTS=0
+    _ASTER_CAPTURE_FOREIGN_HIGHLIGHTS=0
+    _aster_fuzzy_reset
+    _aster_preview_clear
     (( preserve_buffer )) || _ASTER_MENU_BUFFER=""
     _ASTER_MENU_ACCEPTS=()
     _ASTER_MENU_DISPLAYS=()
@@ -405,6 +602,26 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
       region_highlight=( "${(@)region_highlight:#*memo=aster*}" )
       _ASTER_MENU_OWNS_DISPLAY=0
     fi
+  }
+
+  _aster_fuzzy_start() {
+    (( CURSOR == ${#BUFFER} )) || return 1
+    _ASTER_FUZZY_KEYTIMEOUT=$KEYTIMEOUT
+    _ASTER_FUZZY_PREVIOUS_KEYMAP="$KEYMAP"
+    KEYTIMEOUT=1
+    _ASTER_FUZZY_ACTIVE=1
+    zle -K aster-fuzzy
+    _ASTER_FUZZY_BASE="$BUFFER"
+    _ASTER_FUZZY_QUERY=""
+    _ASTER_MENU_BUFFER="$BUFFER"
+    _aster_menu_schedule
+    _aster_menu_render
+  }
+
+  _aster_fuzzy_refresh() {
+    _ASTER_MENU_BUFFER="$BUFFER"
+    _aster_menu_schedule
+    _aster_menu_render
   }
 
   _aster_menu_render() {
@@ -427,6 +644,8 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
       native_icon="T"
     fi
     local input="${BUFFER:-$_ASTER_MENU_REQUEST_BUFFER}"
+    local virtual_query=""
+    (( _ASTER_FUZZY_ACTIVE )) && virtual_query="$_ASTER_FUZZY_QUERY"
     local cursor_position=$CURSOR
     if [[ -z "$BUFFER" && -n "$_ASTER_MENU_REQUEST_BUFFER" ]]; then
       cursor_position=$_ASTER_MENU_REQUEST_CURSOR
@@ -434,11 +653,20 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
     local box_width=$(( ${COLUMNS:-80} - 2 ))
     (( box_width > __ASTER_UI_MENU_WIDTH__ )) && box_width=__ASTER_UI_MENU_WIDTH__
     if (( box_width < 40 )); then
-      POSTDISPLAY=""
+      POSTDISPLAY="$virtual_query"
       return 0
     fi
 
     local total=${#_ASTER_MENU_DISPLAYS}
+    if (( total == 0 )); then
+      region_highlight=( "${(@)region_highlight:#*memo=aster*}" )
+      POSTDISPLAY="$virtual_query"
+      if [[ -n "$virtual_query" ]]; then
+        region_highlight+=("${#input} $(( ${#input} + ${#virtual_query} )) fg=__ASTER_UI_ACCENT__,bold memo=aster")
+      fi
+      _ASTER_MENU_OWNS_DISPLAY=1
+      return 0
+    fi
     local window_size=$total
     (( window_size > __ASTER_UI_MAX_VISIBLE__ )) && window_size=__ASTER_UI_MAX_VISIBLE__
     local max_start=$(( total - window_size + 1 ))
@@ -464,7 +692,9 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
     printf -v fill '%*s' "$(( box_width - ${#top_prefix} - ${#count} - 1 ))" ""
     fill="${fill// /$horizontal}"
     top="${top_prefix}${fill}${count}${top_right}"
-    local footer=" Ctrl-N/K move ${separator} __ASTER_COMPLETION_KEY_LABEL__ accept "
+    local footer=" S-Tab/K up ${separator} C-N down ${separator} Tab part ${separator} __ASTER_COMPLETION_KEY_LABEL__ full "
+    (( _ASTER_FUZZY_ACTIVE )) && \
+      footer=" Esc exit ${separator} C-K up ${separator} C-N down ${separator} Tab choose "
     local bottom_prefix="${bottom_left}${horizontal}${footer}"
     printf -v fill '%*s' "$(( box_width - ${#bottom_prefix} - 1 ))" ""
     fill="${fill// /$horizontal}"
@@ -478,14 +708,18 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
     printf -v padding '%*s' "$indent" ""
 
     local selected="$_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]"
-    if (( cursor_position == ${#input} )) && [[ -n "$input" && "$selected" == "$input"* ]]; then
+    _aster_preview_consider
+    if (( ! _ASTER_FUZZY_ACTIVE && cursor_position == ${#input} )) &&
+       [[ -n "$input" && "$selected" == "$input"* ]]; then
       ghost="${selected[${#input}+1,-1]}"
     fi
 
     region_highlight=( "${(@)region_highlight:#*memo=aster*}" )
-    POSTDISPLAY="$ghost"
+    (( _ASTER_FUZZY_ACTIVE )) && POSTDISPLAY="$virtual_query" || POSTDISPLAY="$ghost"
     local buffer_end=${#input}
-    if [[ -n "$ghost" ]]; then
+    if [[ -n "$virtual_query" ]]; then
+      region_highlight+=("$buffer_end $(( buffer_end + ${#virtual_query} )) fg=__ASTER_UI_ACCENT__,bold memo=aster")
+    elif [[ -n "$ghost" ]]; then
       region_highlight+=("$buffer_end $(( buffer_end + ${#ghost} )) fg=__ASTER_UI_GHOST__ memo=aster")
     fi
 
@@ -528,7 +762,8 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
       region_highlight+=("$line_start $(( line_start + 1 )) fg=__ASTER_UI_BORDER__ memo=aster")
       region_highlight+=("$(( line_start + ${#row} - 1 )) $(( line_start + ${#row} )) fg=__ASTER_UI_BORDER__ memo=aster")
 
-      local match_length=${#input}
+      local match_length=0
+      (( ! _ASTER_FUZZY_ACTIVE )) && match_length=${#input}
       (( match_length > title_width )) && match_length=$title_width
       if (( match_length > 0 )); then
         if (( index == _ASTER_MENU_INDEX )); then
@@ -548,6 +783,59 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
     line_start=$(( ${#input} + ${#POSTDISPLAY} + 1 + indent ))
     POSTDISPLAY+=$'\n'"${padding}${bottom}"
     region_highlight+=("$line_start $(( line_start + ${#bottom} )) fg=__ASTER_UI_BORDER__ memo=aster")
+    local preview_source="${_ASTER_MENU_SOURCES[$_ASTER_MENU_INDEX]}"
+    local preview_description="${_ASTER_MENU_DESCRIPTIONS[$_ASTER_MENU_INDEX]}"
+    local show_preview=0
+    if [[ "$preview_source" == command && -n "$preview_description" &&
+          "$preview_description" != "System command" &&
+          "$preview_description" != "Executable installed by "* ]]; then
+      show_preview=1
+    elif [[ "$preview_source" == native && ${#_ASTER_PREVIEW_LINES} -gt 0 &&
+            "${_ASTER_PREVIEW_LINES[1]}" != "Preview unavailable" &&
+            "${_ASTER_PREVIEW_LINES[1]}" != "Preview timed out" ]]; then
+      show_preview=1
+    fi
+    if (( ${COLUMNS:-80} >= 100 && show_preview )); then
+      local preview_width=$(( ${COLUMNS:-80} - indent - 1 ))
+      (( preview_width > 96 )) && preview_width=96
+      if (( preview_width >= 40 )); then
+        local preview_label=" Preview: ${selected} " preview_top preview_bottom preview_line
+        local preview_content_width=$(( preview_width - 4 ))
+        local -a preview_lines
+        if (( ${#_ASTER_PREVIEW_LINES} )); then
+          preview_lines=("${_ASTER_PREVIEW_LINES[@]}")
+        else
+          preview_lines=("Source: ${_ASTER_MENU_SOURCES[$_ASTER_MENU_INDEX]} / ${_ASTER_MENU_KINDS[$_ASTER_MENU_INDEX]}")
+          preview_lines+=("$preview_description")
+        fi
+        (( ${#preview_label} > preview_width - 2 )) && \
+          preview_label="${preview_label[1,$(( preview_width - 3 ))]}${ellipsis}"
+        printf -v fill '%*s' "$(( preview_width - ${#preview_label} - 2 ))" ""
+        fill="${fill// /$horizontal}"
+        preview_top="${top_left}${preview_label}${fill}${top_right}"
+        line_start=$(( ${#input} + ${#POSTDISPLAY} + 1 + indent ))
+        POSTDISPLAY+=$'\n'"${padding}${preview_top}"
+        region_highlight+=("$line_start $(( line_start + ${#preview_top} )) fg=__ASTER_UI_BORDER__ memo=aster")
+        local preview_index
+        for (( preview_index = 1; preview_index <= ${#preview_lines} && preview_index <= 8; preview_index++ )); do
+          preview_line="${preview_lines[$preview_index]}"
+          (( ${#preview_line} > preview_content_width )) && \
+            preview_line="${preview_line[1,$(( preview_content_width - 1 ))]}${ellipsis}"
+          printf -v row '%s %-*s %s' "$vertical" "$preview_content_width" "$preview_line" "$vertical"
+          line_start=$(( ${#input} + ${#POSTDISPLAY} + 1 + indent ))
+          POSTDISPLAY+=$'\n'"${padding}${row}"
+          region_highlight+=("$line_start $(( line_start + 1 )) fg=__ASTER_UI_BORDER__ memo=aster")
+          region_highlight+=("$(( line_start + 1 )) $(( line_start + ${#row} - 1 )) fg=__ASTER_UI_TEXT__ memo=aster")
+          region_highlight+=("$(( line_start + ${#row} - 1 )) $(( line_start + ${#row} )) fg=__ASTER_UI_BORDER__ memo=aster")
+        done
+        printf -v fill '%*s' "$(( preview_width - 2 ))" ""
+        fill="${fill// /$horizontal}"
+        preview_bottom="${bottom_left}${fill}${bottom_right}"
+        line_start=$(( ${#input} + ${#POSTDISPLAY} + 1 + indent ))
+        POSTDISPLAY+=$'\n'"${padding}${preview_bottom}"
+        region_highlight+=("$line_start $(( line_start + ${#preview_bottom} )) fg=__ASTER_UI_BORDER__ memo=aster")
+      fi
+    fi
     _ASTER_MENU_OWNS_DISPLAY=1
   }
 
@@ -587,17 +875,109 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
     return 0
   }
 
+  _aster_next_segment() {
+    local value="$1" character
+    local index saw_non_whitespace=0
+    REPLY="$value"
+    for (( index = 1; index <= ${#value}; index++ )); do
+      character="${value[$index]}"
+      if [[ "$character" == [[:space:]] ]]; then
+        if (( saw_non_whitespace )); then
+          REPLY="${value[1,$index]}"
+          return 0
+        fi
+        continue
+      fi
+      saw_non_whitespace=1
+      if [[ "$character" == [/:=,] ]]; then
+        REPLY="${value[1,$index]}"
+        return 0
+      fi
+    done
+  }
+
   _aster_menu_accept() {
+    local mode="${1:-candidate}"
+    local accept="${_ASTER_MENU_ACCEPTS[$_ASTER_MENU_INDEX]}"
+    local display="${_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}"
+    local source="${_ASTER_MENU_SOURCES[$_ASTER_MENU_INDEX]}"
     (( CURSOR == ${#BUFFER} )) || return 1
-    LBUFFER+="${_ASTER_MENU_ACCEPTS[$_ASTER_MENU_INDEX]}"
+    if (( _ASTER_FUZZY_ACTIVE )); then
+      _aster_menu_clear
+      BUFFER="$accept"
+      [[ "$source" == command && "$BUFFER" != *[[:space:]]* ]] && BUFFER+=" "
+      CURSOR=${#BUFFER}
+      _ASTER_MENU_BUFFER="$BUFFER"
+      _aster_menu_schedule
+      return 0
+    fi
+    if [[ "$mode" == segment ]]; then
+      _aster_next_segment "$accept"
+      accept="$REPLY"
+    fi
+    LBUFFER+="$accept"
+    if [[ "$source" == native && "$BUFFER" == "$display" &&
+          "${BUFFER[-1]}" != [/:=,[:space:]] ]]; then
+      LBUFFER+=" "
+    fi
     POSTDISPLAY=""
-    _aster_menu_clear
-    _ASTER_MENU_BUFFER="$BUFFER"
-    _aster_menu_schedule
+    if [[ "$mode" == segment ]]; then
+      _aster_menu_refresh
+    else
+      _aster_menu_clear
+      _ASTER_MENU_BUFFER="$BUFFER"
+      _aster_menu_schedule
+    fi
+  }
+
+  _aster_call_native_completion() {
+    local widget="$1"
+    _ASTER_IN_NATIVE_COMPLETION=1
+    {
+      zle "$widget"
+    } always {
+      _ASTER_IN_NATIVE_COMPLETION=0
+    }
   }
 
   _aster_menu_refresh() {
-    _aster_menu_clear
+    local selected="$_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]"
+    local previous_buffer="$_ASTER_MENU_BUFFER" delta="" accept
+    local index retained_index
+    local -a accepts displays descriptions kinds sources
+    if (( _ASTER_MENU_ACTIVE )) && [[ "$BUFFER" == "$previous_buffer"* ]]; then
+      delta="${BUFFER[${#previous_buffer}+1,-1]}"
+      for (( index = 1; index <= ${#_ASTER_MENU_DISPLAYS}; index++ )); do
+        [[ "${_ASTER_MENU_DISPLAYS[$index]}" == "$BUFFER"* ]] || continue
+        accept="${_ASTER_MENU_ACCEPTS[$index]}"
+        if [[ -n "$delta" ]]; then
+          [[ "$accept" == "$delta"* ]] || continue
+          accept="${accept[${#delta}+1,-1]}"
+        fi
+        [[ -n "$accept" ]] || continue
+        accepts+=("$accept")
+        displays+=("${_ASTER_MENU_DISPLAYS[$index]}")
+        descriptions+=("${_ASTER_MENU_DESCRIPTIONS[$index]}")
+        kinds+=("${_ASTER_MENU_KINDS[$index]}")
+        sources+=("${_ASTER_MENU_SOURCES[$index]}")
+      done
+    fi
+    if (( ${#displays} )); then
+      _ASTER_MENU_ACCEPTS=("${accepts[@]}")
+      _ASTER_MENU_DISPLAYS=("${displays[@]}")
+      _ASTER_MENU_DESCRIPTIONS=("${descriptions[@]}")
+      _ASTER_MENU_KINDS=("${kinds[@]}")
+      _ASTER_MENU_SOURCES=("${sources[@]}")
+      retained_index=${_ASTER_MENU_DISPLAYS[(Ie)$selected]}
+      (( retained_index )) || retained_index=1
+      _ASTER_MENU_INDEX=$retained_index
+      _ASTER_MENU_START=$retained_index
+      _ASTER_MENU_BUFFER="$BUFFER"
+      _ASTER_CAPTURE_FOREIGN_HIGHLIGHTS=1
+      _aster_menu_render
+    else
+      _aster_menu_clear
+    fi
     _ASTER_MENU_BUFFER="$BUFFER"
     if [[ -n "$BUFFER" ]] && (( CURSOR == ${#BUFFER} )); then
       _aster_menu_schedule
@@ -725,6 +1105,11 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
     _ASTER_DAEMON_KINDS=("${kinds[@]}")
     _ASTER_DAEMON_SOURCES=("${sources[@]}")
     (( any_pending )) && _ASTER_MENU_REFRESH_TICKS=5 || _ASTER_MENU_REFRESH_TICKS=0
+    if (( ! _ASTER_FUZZY_ACTIVE && ${#accepts} == 0 && _ASTER_MENU_ACTIVE &&
+          $+functions[_main_complete] )) &&
+       (( ! _ASTER_NATIVE_REQUESTED || _ASTER_NATIVE_REQUEST_FD >= 0 )); then
+      return 0
+    fi
     _aster_menu_publish
   }
 
@@ -855,8 +1240,12 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
     local -a rendered_highlights
     if (( ${#_ASTER_MENU_ACCEPTS} == 0 )); then
       _ASTER_MENU_ACTIVE=0
-      POSTDISPLAY=""
       region_highlight=( "${_ASTER_FOREIGN_HIGHLIGHTS[@]}" )
+      if (( _ASTER_FUZZY_ACTIVE )); then
+        _aster_menu_render
+      else
+        POSTDISPLAY=""
+      fi
       rendered_highlights=( "${region_highlight[@]}" )
       _ASTER_RENDERED_HIGHLIGHTS=( "${rendered_highlights[@]}" )
       _ASTER_RESTORE_HIGHLIGHTS=1
@@ -923,19 +1312,38 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
       _ASTER_MENU_TICK_FD=-1
       return 0
     fi
+    (( _ASTER_IN_NATIVE_COMPLETION )) && return 0
+    if [[ -n "$_ASTER_PREVIEW_PATH" ]]; then
+      (( _ASTER_PREVIEW_TICKS++ ))
+      if (( _ASTER_PREVIEW_FD < 0 && _ASTER_PREVIEW_TICKS >= 2 )); then
+        local preview_fd
+        exec {preview_fd}< <(command aster preview-file \
+          --path "$_ASTER_PREVIEW_PATH" \
+          --cwd "$PWD" 2>/dev/null)
+        _ASTER_PREVIEW_FD="$preview_fd"
+        _ASTER_PREVIEW_PID=$!
+        _ASTER_PREVIEW_TICKS=0
+        zle -F "$preview_fd" _aster_preview_ready
+      elif (( _ASTER_PREVIEW_FD >= 0 && _ASTER_PREVIEW_TICKS > 34 )); then
+        _aster_preview_cancel
+        _ASTER_PREVIEW_PATH=""
+        _ASTER_PREVIEW_LINES=("Preview timed out")
+        zle -R
+      fi
+    fi
     if (( _ASTER_NATIVE_REQUEST_FD >= 0 )); then
       (( _ASTER_NATIVE_REQUEST_TICKS++ ))
       if (( _ASTER_NATIVE_REQUEST_TICKS > 50 )); then
         _aster_native_cancel
+        _aster_menu_publish
       fi
     fi
-    if (( ! _ASTER_NATIVE_REQUESTED )) && [[ -n "$_ASTER_MENU_REQUEST_BUFFER" ]]; then
+    if (( ! _ASTER_FUZZY_ACTIVE && ! _ASTER_NATIVE_REQUESTED )) &&
+       [[ -n "$_ASTER_MENU_REQUEST_BUFFER" ]]; then
       (( _ASTER_NATIVE_START_TICKS++ ))
-      if (( _ASTER_NATIVE_START_TICKS >= 4 )); then
+      if (( _ASTER_NATIVE_START_TICKS >= 2 )) && (( $+functions[_main_complete] )); then
         _ASTER_NATIVE_REQUESTED=1
-        if (( $+functions[_main_complete] )); then
-          zle aster-native-capture
-        fi
+        _aster_call_native_completion aster-native-capture
       fi
     fi
     if (( ! _ASTER_MENU_REQUEST_DIRTY )); then
@@ -954,11 +1362,18 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
     fi
 
     _aster_menu_cancel_query
-    exec {query_fd}< <(print -rn -- "$buffer" | command aster complete \
-      --stdin \
-      --cursor "$cursor" \
-      --cwd "$cwd" \
-      --format zsh-v2 2>/dev/null)
+    if (( _ASTER_FUZZY_ACTIVE )); then
+      exec {query_fd}< <(command aster fuzzy \
+        --query "$_ASTER_FUZZY_QUERY" \
+        --cwd "$cwd" \
+        --format zsh-v2 2>/dev/null)
+    else
+      exec {query_fd}< <(print -rn -- "$buffer" | command aster complete \
+        --stdin \
+        --cursor "$cursor" \
+        --cwd "$cwd" \
+        --format zsh-v2 2>/dev/null)
+    fi
     _ASTER_MENU_REQUEST_FD="$query_fd"
     zle -F "$query_fd" _aster_menu_request_ready
   }
@@ -973,35 +1388,101 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
   }
 
   _aster_self_insert() {
+    if (( _ASTER_FUZZY_ACTIVE )); then
+      _ASTER_FUZZY_QUERY+="$KEYS"
+      _aster_fuzzy_refresh
+      return
+    fi
     zle _aster-native-self-insert
     _aster_menu_refresh
   }
 
+  _aster_space() {
+    if (( _ASTER_FUZZY_ACTIVE )); then
+      _ASTER_FUZZY_QUERY+=" "
+      _aster_fuzzy_refresh
+      return
+    fi
+    if [[ "$LBUFFER" == *" " ]] && (( CURSOR == ${#BUFFER} )); then
+      _aster_fuzzy_start
+      return
+    fi
+    zle _aster-native-space
+    _aster_menu_refresh
+  }
+
   _aster_backward_delete() {
+    if (( _ASTER_FUZZY_ACTIVE )); then
+      if [[ -n "$_ASTER_FUZZY_QUERY" ]]; then
+        _ASTER_FUZZY_QUERY="${_ASTER_FUZZY_QUERY[1,-2]}"
+        _aster_fuzzy_refresh
+      else
+        _aster_menu_clear
+        zle _aster-native-backward-delete
+        _aster_menu_refresh
+      fi
+      return
+    fi
     zle _aster-native-backward-delete
     _aster_menu_refresh
   }
 
   _aster_bracketed_paste() {
+    _aster_menu_clear 1
+    POSTDISPLAY=""
     zle _aster-native-bracketed-paste
     _aster_menu_refresh
   }
 
   _aster_tab() {
+    if (( _ASTER_FUZZY_ACTIVE )); then
+      if (( _ASTER_MENU_ACTIVE )); then
+        _aster_menu_accept
+      else
+        zle beep
+      fi
+      return
+    fi
+    if (( _ASTER_MENU_ACTIVE && CURSOR == ${#BUFFER} )); then
+      _aster_menu_accept segment
+      return
+    fi
     _aster_menu_clear
     POSTDISPLAY=""
-    zle _aster-native-tab
+    _aster_call_native_completion _aster-native-tab
     _ASTER_MENU_BUFFER="$BUFFER"
+    [[ -n "$BUFFER" ]] && (( CURSOR == ${#BUFFER} )) && _aster_menu_schedule
+  }
+
+  _aster_shift_tab() {
+    if (( _ASTER_MENU_ACTIVE )); then
+      (( _ASTER_MENU_INDEX > 1 )) && (( _ASTER_MENU_INDEX-- ))
+      _aster_menu_render
+      return
+    fi
+    if (( _ASTER_FUZZY_ACTIVE )); then
+      zle beep
+      return
+    fi
+    _aster_menu_clear
+    POSTDISPLAY=""
+    _aster_call_native_completion _aster-native-shift-tab
+    _ASTER_MENU_BUFFER="$BUFFER"
+    [[ -n "$BUFFER" ]] && (( CURSOR == ${#BUFFER} )) && _aster_menu_schedule
   }
 
   _aster_complete() {
+    if (( _ASTER_FUZZY_ACTIVE && ! _ASTER_MENU_ACTIVE )); then
+      zle beep
+      return
+    fi
     if (( _ASTER_MENU_ACTIVE && CURSOR == ${#BUFFER} )); then
       _aster_menu_accept
     elif (( CURSOR == ${#BUFFER} )) && _aster_menu_query; then
       _aster_menu_accept
     else
       (( _ASTER_MENU_ACTIVE )) && _aster_menu_clear 1
-      zle _aster-native-trigger
+      _aster_call_native_completion _aster-native-trigger
     fi
   }
 
@@ -1009,6 +1490,8 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
     if (( _ASTER_MENU_ACTIVE )); then
       (( _ASTER_MENU_INDEX < ${#_ASTER_MENU_ACCEPTS} )) && (( _ASTER_MENU_INDEX++ ))
       _aster_menu_render
+    elif (( _ASTER_FUZZY_ACTIVE )); then
+      zle beep
     else
       zle _aster-native-down
       _aster_menu_refresh
@@ -1019,14 +1502,35 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
     if (( _ASTER_MENU_ACTIVE )); then
       (( _ASTER_MENU_INDEX > 1 )) && (( _ASTER_MENU_INDEX-- ))
       _aster_menu_render
+    elif (( _ASTER_FUZZY_ACTIVE )); then
+      zle beep
     else
       zle _aster-native-up
       _aster_menu_refresh
     fi
   }
 
+  _aster_escape() {
+    if (( _ASTER_FUZZY_ACTIVE )); then
+      local base="$_ASTER_FUZZY_BASE"
+      _aster_menu_clear
+      BUFFER="$base"
+      CURSOR=${#BUFFER}
+      _ASTER_MENU_BUFFER="$BUFFER"
+      [[ "$BUFFER" == *[![:space:]]* ]] && _aster_menu_schedule
+      region_highlight=( "${_ASTER_FOREIGN_HIGHLIGHTS[@]}" )
+      zle -R
+      return
+    fi
+    zle _aster-native-escape
+  }
+
   _aster_menu_pre_redraw() {
-    if (( _ASTER_MENU_ACTIVE )) && [[ "$BUFFER" == "$_ASTER_MENU_BUFFER" ]]; then
+    if (( _ASTER_CAPTURE_FOREIGN_HIGHLIGHTS )); then
+      _ASTER_FOREIGN_HIGHLIGHTS=( "${(@)region_highlight:#*memo=aster*}" )
+      _ASTER_CAPTURE_FOREIGN_HIGHLIGHTS=0
+    elif (( _ASTER_MENU_ACTIVE || _ASTER_FUZZY_ACTIVE )) &&
+         [[ "$BUFFER" == "$_ASTER_MENU_BUFFER" ]]; then
       region_highlight=( "${_ASTER_FOREIGN_HIGHLIGHTS[@]}" )
       _ASTER_RESTORE_HIGHLIGHTS=0
     elif (( _ASTER_RESTORE_HIGHLIGHTS )); then
@@ -1044,9 +1548,14 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
       _ASTER_MENU_BUFFER="$BUFFER"
       [[ -n "$BUFFER" ]] && (( CURSOR == ${#BUFFER} )) && _aster_menu_schedule
     elif (( CURSOR != ${#BUFFER} )); then
-      _aster_menu_cancel_request
+      if (( _ASTER_FUZZY_ACTIVE )); then
+        _aster_menu_clear
+        _ASTER_MENU_BUFFER="$BUFFER"
+      else
+        _aster_menu_cancel_request
+      fi
     fi
-    (( _ASTER_MENU_ACTIVE )) && _aster_menu_render
+    (( _ASTER_MENU_ACTIVE || _ASTER_FUZZY_ACTIVE )) && _aster_menu_render
   }
 
   autoload -Uz add-zsh-hook
@@ -1064,42 +1573,92 @@ if [[ -o interactive && -z "${ASTER_ZSH_LOADED:-}" ]] && (( $+commands[aster] ))
   preexec_functions=(_aster_preexec ${preexec_functions:#_aster_preexec})
   precmd_functions=(_aster_precmd ${precmd_functions:#_aster_precmd})
 
-  typeset -g _ASTER_PREVIOUS_TRIGGER="${$(bindkey '__ASTER_COMPLETION_KEY__')##* }"
-  [[ -z "$_ASTER_PREVIOUS_TRIGGER" || "$_ASTER_PREVIOUS_TRIGGER" == "undefined-key" ]] && \
-    _ASTER_PREVIOUS_TRIGGER=set-mark-command
-  typeset -g _ASTER_PREVIOUS_DOWN="${$(bindkey '^N')##* }"
-  typeset -g _ASTER_PREVIOUS_UP="${$(bindkey '^K')##* }"
-  [[ -z "$_ASTER_PREVIOUS_DOWN" || "$_ASTER_PREVIOUS_DOWN" == "undefined-key" ]] && \
-    _ASTER_PREVIOUS_DOWN=down-line-or-history
-  [[ -z "$_ASTER_PREVIOUS_UP" || "$_ASTER_PREVIOUS_UP" == "undefined-key" ]] && \
-    _ASTER_PREVIOUS_UP=kill-line
-  zle -A "$_ASTER_PREVIOUS_TRIGGER" _aster-native-trigger
-  zle -A "$_ASTER_PREVIOUS_DOWN" _aster-native-down
-  zle -A "$_ASTER_PREVIOUS_UP" _aster-native-up
-  zle -A self-insert _aster-native-self-insert
-  zle -A backward-delete-char _aster-native-backward-delete
-  zle -A bracketed-paste _aster-native-bracketed-paste
-  if [[ '__ASTER_COMPLETION_KEY__' != '^I' ]]; then
+  if [[ -z "${widgets[_aster-native-self-insert]:-}" ]]; then
+    typeset -g _ASTER_PREVIOUS_TRIGGER="${$(bindkey '__ASTER_COMPLETION_KEY__')##* }"
+    [[ -z "$_ASTER_PREVIOUS_TRIGGER" || "$_ASTER_PREVIOUS_TRIGGER" == "undefined-key" ]] && \
+      _ASTER_PREVIOUS_TRIGGER=set-mark-command
+    typeset -g _ASTER_PREVIOUS_DOWN="${$(bindkey '^N')##* }"
+    typeset -g _ASTER_PREVIOUS_UP="${$(bindkey '^K')##* }"
+    typeset -g _ASTER_PREVIOUS_SHIFT_TAB="${$(bindkey '^[[Z')##* }"
+    typeset -g _ASTER_PREVIOUS_ESCAPE="${$(bindkey '^[')##* }"
+    [[ -z "$_ASTER_PREVIOUS_DOWN" || "$_ASTER_PREVIOUS_DOWN" == "undefined-key" ]] && \
+      _ASTER_PREVIOUS_DOWN=down-line-or-history
+    [[ -z "$_ASTER_PREVIOUS_UP" || "$_ASTER_PREVIOUS_UP" == "undefined-key" ]] && \
+      _ASTER_PREVIOUS_UP=kill-line
+    [[ -z "$_ASTER_PREVIOUS_SHIFT_TAB" || "$_ASTER_PREVIOUS_SHIFT_TAB" == "undefined-key" ]] && \
+      _ASTER_PREVIOUS_SHIFT_TAB=reverse-menu-complete
+    [[ -z "$_ASTER_PREVIOUS_ESCAPE" ]] && _ASTER_PREVIOUS_ESCAPE=undefined-key
+    zle -A "$_ASTER_PREVIOUS_TRIGGER" _aster-native-trigger
+    zle -A "$_ASTER_PREVIOUS_DOWN" _aster-native-down
+    zle -A "$_ASTER_PREVIOUS_UP" _aster-native-up
+    zle -A "$_ASTER_PREVIOUS_SHIFT_TAB" _aster-native-shift-tab
+    zle -A "$_ASTER_PREVIOUS_ESCAPE" _aster-native-escape
+    zle -A self-insert _aster-native-self-insert
+    typeset -g _ASTER_PREVIOUS_SPACE="${$(bindkey ' ')##* }"
+    [[ -z "$_ASTER_PREVIOUS_SPACE" || "$_ASTER_PREVIOUS_SPACE" == "undefined-key" ]] && \
+      _ASTER_PREVIOUS_SPACE=self-insert
+    zle -A "$_ASTER_PREVIOUS_SPACE" _aster-native-space
+    zle -A backward-delete-char _aster-native-backward-delete
+    zle -A bracketed-paste _aster-native-bracketed-paste
     typeset -g _ASTER_PREVIOUS_TAB="${$(bindkey '^I')##* }"
     [[ -z "$_ASTER_PREVIOUS_TAB" || "$_ASTER_PREVIOUS_TAB" == "undefined-key" ]] && \
       _ASTER_PREVIOUS_TAB=expand-or-complete
     zle -A "$_ASTER_PREVIOUS_TAB" _aster-native-tab
-    zle -N aster-tab _aster_tab
-    bindkey '^I' aster-tab
   fi
+  if [[ -z "${widgets[_aster-native-space]:-}" ]]; then
+    if [[ -z "${_ASTER_PREVIOUS_SPACE:-}" || "$_ASTER_PREVIOUS_SPACE" == aster-space ]]; then
+      typeset -g _ASTER_PREVIOUS_SPACE="${$(bindkey ' ')##* }"
+      if [[ -z "$_ASTER_PREVIOUS_SPACE" || "$_ASTER_PREVIOUS_SPACE" == "undefined-key" ||
+            "$_ASTER_PREVIOUS_SPACE" == aster-space ]]; then
+        if [[ -n "${widgets[magic-space]:-}" ]]; then
+          _ASTER_PREVIOUS_SPACE=magic-space
+        else
+          _ASTER_PREVIOUS_SPACE=self-insert
+        fi
+      fi
+    fi
+    zle -A "$_ASTER_PREVIOUS_SPACE" _aster-native-space
+  fi
+  if [[ -z "${widgets[_aster-native-escape]:-}" ]]; then
+    if [[ -z "${_ASTER_PREVIOUS_ESCAPE:-}" || "$_ASTER_PREVIOUS_ESCAPE" == aster-escape ]]; then
+      typeset -g _ASTER_PREVIOUS_ESCAPE="${$(bindkey '^[')##* }"
+      [[ -z "$_ASTER_PREVIOUS_ESCAPE" || "$_ASTER_PREVIOUS_ESCAPE" == aster-escape ]] && \
+        _ASTER_PREVIOUS_ESCAPE=undefined-key
+    fi
+    zle -A "$_ASTER_PREVIOUS_ESCAPE" _aster-native-escape
+  fi
+  zle -N aster-tab _aster_tab
+  bindkey '^I' aster-tab
   zle -N aster-complete _aster_complete
   zle -N aster-menu-down _aster_menu_down
   zle -N aster-menu-up _aster_menu_up
+  zle -N aster-shift-tab _aster_shift_tab
+  zle -N aster-escape _aster_escape
   zle -N aster-menu-ready _aster_menu_request_ready
   zle -N aster-menu-apply _aster_menu_apply_result
   zle -N aster-menu-tick _aster_menu_tick
   zle -C aster-native-capture .complete-word _aster_native_capture_widget
   zle -N self-insert _aster_self_insert
+  zle -N aster-space _aster_space
   zle -N backward-delete-char _aster_backward_delete
   zle -N bracketed-paste _aster_bracketed_paste
   bindkey '__ASTER_COMPLETION_KEY__' aster-complete
   bindkey '^N' aster-menu-down
   bindkey '^K' aster-menu-up
+  bindkey '^[[Z' aster-shift-tab
+  bindkey '^[' aster-escape
+  bindkey ' ' aster-space
+  bindkey -N aster-fuzzy
+  bindkey -M aster-fuzzy -R ' '-'~' self-insert
+  bindkey -M aster-fuzzy ' ' aster-space
+  bindkey -M aster-fuzzy '^?' backward-delete-char
+  bindkey -M aster-fuzzy '^H' backward-delete-char
+  bindkey -M aster-fuzzy '^I' aster-tab
+  bindkey -M aster-fuzzy '^N' aster-menu-down
+  bindkey -M aster-fuzzy '^K' aster-menu-up
+  bindkey -M aster-fuzzy '__ASTER_COMPLETION_KEY__' aster-complete
+  bindkey -M aster-fuzzy '^M' aster-complete
+  bindkey -M aster-fuzzy '^[' aster-escape
 
   if [[ -n "${HISTFILE:-}" && -r "$HISTFILE" ]]; then
     command aster import-history --file "${HISTFILE:A}" >/dev/null 2>&1 &!
@@ -1140,7 +1699,8 @@ mod tests {
         let mut settings = Settings::default();
         let integration = zsh_integration(&settings).unwrap();
         assert!(integration.contains("bindkey '^@' aster-complete"));
-        assert!(integration.contains("Ctrl-Space accept"));
+        assert!(integration.contains("Ctrl-Space full"));
+        assert!(integration.contains("bindkey '^[[Z' aster-shift-tab"));
         assert!(integration.contains("--format zsh-v2"));
         assert!(integration.contains("_ASTER_MENU_REFRESH_TICKS=5"));
         assert!(integration.contains("zle -C aster-native-capture"));

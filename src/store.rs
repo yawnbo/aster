@@ -150,6 +150,41 @@ impl Store {
             .context("failed to read history candidates")
     }
 
+    pub fn history_inventory(
+        &self,
+        cwd: &str,
+        limit: usize,
+        successful_first: bool,
+    ) -> Result<Vec<HistoryCandidate>> {
+        let success_order = i64::from(successful_first);
+        let mut statement = self.connection.prepare(
+            "SELECT
+                command,
+                MAX(CASE WHEN cwd = ?1 THEN 1 ELSE 0 END) AS same_cwd,
+                SUM(CASE WHEN exit_code = 0 THEN 1 ELSE 0 END) AS successes,
+                MAX(observed_at_ms) AS latest,
+                COUNT(*) AS uses
+             FROM command_events
+             GROUP BY command
+             ORDER BY
+                same_cwd DESC,
+                CASE WHEN ?3 = 1 AND successes > 0 THEN 1 ELSE 0 END DESC,
+                latest DESC,
+                uses DESC,
+                command ASC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![cwd, limit as i64, success_order], |row| {
+            Ok(HistoryCandidate {
+                command: row.get(0)?,
+                same_cwd: row.get::<_, i64>(1)? != 0,
+                uses: row.get::<_, i64>(4)?.max(0) as usize,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<HistoryCandidate>>>()
+            .context("failed to read fuzzy history inventory")
+    }
+
     pub fn import_zsh_history(
         &mut self,
         path: &Path,
@@ -349,6 +384,25 @@ mod tests {
                 .map(|candidate| candidate.command)
                 .collect::<Vec<_>>(),
             vec!["git switch main", "git stash", "git status"]
+        );
+    }
+
+    #[test]
+    fn fuzzy_inventory_is_not_prefix_limited() {
+        let store = Store::in_memory().unwrap();
+        store
+            .record("cargo test", "/repo", 0, 100, "one", true)
+            .unwrap();
+        store
+            .record("git status", "/other", 0, 200, "one", true)
+            .unwrap();
+
+        let candidates = store.history_inventory("/repo", 10, true).unwrap();
+        assert_eq!(candidates[0].command, "cargo test");
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.command == "git status")
         );
     }
 

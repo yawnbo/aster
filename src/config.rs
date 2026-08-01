@@ -55,7 +55,7 @@ impl Default for CompletionSettings {
     fn default() -> Self {
         Self {
             max_candidates: 8,
-            accept: AcceptMode::Segment,
+            accept: AcceptMode::Full,
             key: "ctrl-space".to_owned(),
         }
     }
@@ -160,20 +160,14 @@ fn validate_color(name: &str, color: &str) -> Result<()> {
 pub fn completion_key_sequence(key: &str) -> Result<String> {
     match key {
         "ctrl-space" => Ok("^@".to_owned()),
-        "shift-tab" => Ok("^[[Z".to_owned()),
-        "tab" => Ok("^I".to_owned()),
         _ => {
             let Some(letter) = key.strip_prefix("ctrl-") else {
-                bail!(
-                    "completion.key must be ctrl-space, shift-tab, tab, or ctrl-a through ctrl-z"
-                );
+                bail!("completion.key must be ctrl-space or ctrl-a through ctrl-z");
             };
             if letter.len() != 1 || !letter.as_bytes()[0].is_ascii_lowercase() {
-                bail!(
-                    "completion.key must be ctrl-space, shift-tab, tab, or ctrl-a through ctrl-z"
-                );
+                bail!("completion.key must be ctrl-space or ctrl-a through ctrl-z");
             }
-            if matches!(letter, "j" | "k" | "m" | "n") {
+            if matches!(letter, "i" | "j" | "k" | "m" | "n") {
                 bail!("completion.key conflicts with an Aster menu control");
             }
             Ok(format!("^{}", letter.to_ascii_uppercase()))
@@ -185,12 +179,12 @@ pub const DEFAULT_CONFIG: &str = r#"[completion]
 # Aster abstains instead of filling this list with low-confidence candidates.
 max_candidates = 8
 
-# Accept the highlighted completion with Ctrl-Space. Also accepts "shift-tab",
-# "tab", or "ctrl-a" through "ctrl-z" (excluding reserved menu controls).
+# Accept the highlighted completion with Ctrl-Space. Also accepts "ctrl-a"
+# through "ctrl-z" (excluding reserved menu controls).
 key = "ctrl-space"
 
-# "segment" accepts one path or shell segment; "full" accepts everything.
-accept = "segment"
+# Ctrl-Space accepts the whole suggestion; Tab always advances one segment.
+accept = "full"
 
 [history]
 # Match common shell history privacy behavior.
@@ -347,6 +341,9 @@ mod tests {
     fn validates_completion_key() {
         assert_eq!(completion_key_sequence("ctrl-space").unwrap(), "^@");
         assert_eq!(completion_key_sequence("ctrl-x").unwrap(), "^X");
+        assert!(completion_key_sequence("tab").is_err());
+        assert!(completion_key_sequence("shift-tab").is_err());
+        assert!(completion_key_sequence("ctrl-i").is_err());
         assert!(completion_key_sequence("ctrl-k").is_err());
         assert!(completion_key_sequence("alt-space").is_err());
     }

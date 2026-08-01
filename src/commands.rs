@@ -227,6 +227,22 @@ impl CommandCatalog {
             .collect()
     }
 
+    pub fn inventory(&self) -> Vec<CommandMatch> {
+        let state = self.state.lock().expect("command state lock poisoned");
+        self.entries
+            .iter()
+            .map(|entry| CommandMatch {
+                name: entry.name.clone(),
+                description: state
+                    .descriptions
+                    .get(&entry.name)
+                    .cloned()
+                    .unwrap_or_else(|| entry.description.clone()),
+                description_pending: false,
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     pub fn from_entries(entries: impl IntoIterator<Item = CommandEntry>) -> Self {
         let mut entries: Vec<_> = entries.into_iter().collect();
