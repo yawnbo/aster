@@ -69,6 +69,11 @@ The integration:
   available. History-only and generic rows stay compact; command details reuse
   the existing asynchronous description workers, and selected native text files
   are read through a bounded, sanitized background helper.
+- Previews simple `ls`, GNU `gls`, and `eza` suggestions asynchronously,
+  including `ls` aliases backed by `eza`. Aster passes a validated argv directly
+  without a shell, translates `eza` colors into ZLE-safe highlight spans,
+  disables icons and hyperlinks, caps output, and kills previews that exceed the
+  short deadline.
 - Uses Ctrl-Space to accept the entire highlighted candidate and preserves its
   previous binding as the fallback when Aster has no candidate.
 - Uses Ctrl-N and Ctrl-K to move through an open menu; outside the menu their

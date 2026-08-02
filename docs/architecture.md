@@ -160,6 +160,16 @@ rejects symlinks and non-regular files, and strips non-ASCII controls. Image and
 PDF targets expose metadata only. Graphical Kitty output is reserved for a PTY
 frontend that can own image placement, IDs, tmux passthrough, and cleanup.
 
+Read-only command previews use an explicit provider whitelist. The initial
+provider recognizes only simple `ls`, GNU `gls`, and `eza` command lines. An
+`ls` alias whose executable is `eza` is translated before validation. The
+provider rejects shell syntax and alternate executable paths, invokes the
+program directly without a shell, disables icons and hyperlinks, bounds captured
+output, and terminates the process group after 600 ms. ANSI SGR sequences from
+`eza` are parsed into validated `region_highlight` spans so color is retained
+without placing terminal control bytes in `POSTDISPLAY`. Other commands remain
+description-only until they receive a separately reviewed provider.
+
 ## tmux Titles
 
 Aster owns the per-pane title only while Zsh is idle at the prompt. The Zsh

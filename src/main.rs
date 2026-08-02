@@ -1,5 +1,9 @@
 use std::fs::{self, File};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
+use std::process::{Command as ProcessCommand, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{io, io::Read, io::Write};
 
@@ -64,6 +68,14 @@ enum Command {
     PreviewFile {
         #[arg(long)]
         path: PathBuf,
+        #[arg(long)]
+        cwd: PathBuf,
+    },
+    /// Execute a bounded preview for a supported read-only command.
+    #[command(name = "preview-command")]
+    Preview {
+        #[arg(long)]
+        line: String,
         #[arg(long)]
         cwd: PathBuf,
     },
@@ -167,6 +179,7 @@ fn run() -> Result<()> {
             write_completion(response, format)
         }
         Command::PreviewFile { path, cwd } => write_file_preview(path, cwd),
+        Command::Preview { line, cwd } => write_command_preview(&line, cwd),
         Command::ImportHistory { file } => {
             let file = file
                 .canonicalize()
@@ -264,6 +277,288 @@ fn write_file_preview(path: PathBuf, cwd: PathBuf) -> Result<()> {
         output.write_all(&[0])?;
     }
     Ok(())
+}
+
+fn write_command_preview(line: &str, cwd: PathBuf) -> Result<()> {
+    let lines = command_preview_lines(line, cwd)?;
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    for line in lines {
+        output.write_all(line.text.as_bytes())?;
+        output.write_all(&[0])?;
+        output.write_all(line.styles.as_bytes())?;
+        output.write_all(&[0])?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CommandPreviewLine {
+    text: String,
+    styles: String,
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
+struct AnsiStyle {
+    foreground: Option<String>,
+    background: Option<String>,
+    bold: bool,
+    underline: bool,
+    standout: bool,
+}
+
+impl AnsiStyle {
+    fn zle(&self) -> String {
+        let mut values = Vec::new();
+        if let Some(foreground) = &self.foreground {
+            values.push(format!("fg={foreground}"));
+        }
+        if let Some(background) = &self.background {
+            values.push(format!("bg={background}"));
+        }
+        if self.bold {
+            values.push("bold".to_owned());
+        }
+        if self.underline {
+            values.push("underline".to_owned());
+        }
+        if self.standout {
+            values.push("standout".to_owned());
+        }
+        values.join(",")
+    }
+}
+
+fn command_preview_lines(line: &str, cwd: PathBuf) -> Result<Vec<CommandPreviewLine>> {
+    let (executable, arguments) = command_preview_argv(line)?;
+
+    let mut command = ProcessCommand::new(executable);
+    command
+        .args(&arguments)
+        .current_dir(cwd)
+        .env("LC_ALL", "C")
+        .env("COLUMNS", "80")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    if executable == "eza" {
+        command.env("TERM", "xterm-256color").env_remove("NO_COLOR");
+    } else {
+        command
+            .env("TERM", "dumb")
+            .env("NO_COLOR", "1")
+            .env("CLICOLOR", "0");
+    }
+    let mut child = command.spawn().context("failed to start command preview")?;
+    let stdout = child.stdout.take().expect("preview stdout is piped");
+    let stderr = child.stderr.take().expect("preview stderr is piped");
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.take(32 * 1024).read_to_end(&mut bytes);
+        bytes
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr.take(8 * 1024).read_to_end(&mut bytes);
+        bytes
+    });
+    let deadline = Instant::now() + Duration::from_millis(600);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) | Err(_) => {
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+                let _ = child.kill();
+                break;
+            }
+        }
+    }
+    let _ = child.wait();
+    let stdout = stdout_reader
+        .join()
+        .expect("preview stdout reader panicked");
+    let stderr = stderr_reader
+        .join()
+        .expect("preview stderr reader panicked");
+    let bytes = if stdout.is_empty() { stderr } else { stdout };
+    let text = String::from_utf8_lossy(&bytes);
+    Ok(text
+        .lines()
+        .map(parse_ansi_preview_line)
+        .filter(|line| !line.text.is_empty())
+        .take(8)
+        .collect())
+}
+
+fn command_preview_argv(line: &str) -> Result<(&str, Vec<String>)> {
+    if line.is_empty()
+        || line.len() > 16 * 1024
+        || line
+            .chars()
+            .any(|character| character.is_control() || "'\"\\;&|><$`(){}[]!*?~".contains(character))
+    {
+        bail!("command preview contains unsupported shell syntax");
+    }
+    let mut words = line.split_ascii_whitespace();
+    let executable = words.next().context("command preview is empty")?;
+    if !matches!(executable, "ls" | "gls" | "eza") {
+        bail!("command preview only supports ls, gls, and eza");
+    }
+    let mut arguments = Vec::new();
+    for argument in words {
+        if argument.starts_with("--color")
+            || argument.starts_with("--colour")
+            || argument.starts_with("--hyperlink")
+            || (executable == "eza" && argument.starts_with("--icons"))
+            || (executable != "eza" && matches!(argument, "--dired" | "-G"))
+        {
+            continue;
+        }
+        arguments.push(argument.to_owned());
+    }
+    if executable == "eza" {
+        arguments.push("--color=always".to_owned());
+        arguments.push("--icons=never".to_owned());
+        arguments.push("--width=80".to_owned());
+    } else if executable == "gls" || cfg!(target_os = "linux") {
+        arguments.push("--color=never".to_owned());
+        arguments.push("--hyperlink=never".to_owned());
+    }
+    Ok((executable, arguments))
+}
+
+fn parse_ansi_preview_line(source: &str) -> CommandPreviewLine {
+    let characters: Vec<char> = source.chars().collect();
+    let mut output = String::new();
+    let mut spans = Vec::new();
+    let mut style = AnsiStyle::default();
+    let mut run_style = String::new();
+    let mut run_start = 0;
+    let mut output_length = 0;
+    let mut index = 0;
+
+    while index < characters.len() && output_length < 160 {
+        if characters[index] == '\x1b' {
+            if characters.get(index + 1) == Some(&'[') {
+                let mut end = index + 2;
+                while end < characters.len() && !characters[end].is_ascii_alphabetic() {
+                    end += 1;
+                }
+                if end < characters.len() {
+                    if characters[end] == 'm' {
+                        let parameters: String = characters[index + 2..end].iter().collect();
+                        apply_sgr(&mut style, &parameters);
+                        let next_style = style.zle();
+                        if next_style != run_style {
+                            push_style_span(&mut spans, run_start, output_length, &run_style);
+                            run_start = output_length;
+                            run_style = next_style;
+                        }
+                    }
+                    index = end + 1;
+                    continue;
+                }
+            } else if characters.get(index + 1) == Some(&']') {
+                index += 2;
+                while index < characters.len() {
+                    if characters[index] == '\x07' {
+                        index += 1;
+                        break;
+                    }
+                    if characters[index] == '\x1b' && characters.get(index + 1) == Some(&'\\') {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+                continue;
+            }
+            index += usize::from(characters.get(index + 1).is_some()) + 1;
+            continue;
+        }
+
+        let character = characters[index];
+        if character == '\t' {
+            output.push(' ');
+            output_length += 1;
+        } else if character.is_ascii() && !character.is_control() {
+            output.push(character);
+            output_length += 1;
+        } else if !character.is_control() {
+            output.push('?');
+            output_length += 1;
+        }
+        index += 1;
+    }
+    push_style_span(&mut spans, run_start, output_length, &run_style);
+    CommandPreviewLine {
+        text: output,
+        styles: spans.join(";"),
+    }
+}
+
+fn push_style_span(spans: &mut Vec<String>, start: usize, end: usize, style: &str) {
+    if start < end && !style.is_empty() {
+        spans.push(format!("{start}:{end}:{style}"));
+    }
+}
+
+fn apply_sgr(style: &mut AnsiStyle, parameters: &str) {
+    let values: Vec<u16> = if parameters.is_empty() {
+        vec![0]
+    } else {
+        parameters
+            .split(';')
+            .map(|value| value.parse().unwrap_or(0))
+            .collect()
+    };
+    let mut index = 0;
+    while index < values.len() {
+        let value = values[index];
+        match value {
+            0 => *style = AnsiStyle::default(),
+            1 => style.bold = true,
+            4 => style.underline = true,
+            7 => style.standout = true,
+            22 => style.bold = false,
+            24 => style.underline = false,
+            27 => style.standout = false,
+            30..=37 => style.foreground = Some((value - 30).to_string()),
+            39 => style.foreground = None,
+            40..=47 => style.background = Some((value - 40).to_string()),
+            49 => style.background = None,
+            90..=97 => style.foreground = Some((value - 82).to_string()),
+            100..=107 => style.background = Some((value - 92).to_string()),
+            38 | 48 => {
+                let color = if values.get(index + 1) == Some(&5) {
+                    index += 2;
+                    values
+                        .get(index)
+                        .filter(|value| **value <= 255)
+                        .map(u16::to_string)
+                } else if values.get(index + 1) == Some(&2) && index + 4 < values.len() {
+                    let red = values[index + 2].min(255);
+                    let green = values[index + 3].min(255);
+                    let blue = values[index + 4].min(255);
+                    index += 4;
+                    Some(format!("#{red:02x}{green:02x}{blue:02x}"))
+                } else {
+                    None
+                };
+                if value == 38 {
+                    style.foreground = color;
+                } else {
+                    style.background = color;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
 }
 
 fn doctor(paths: &Paths) -> Result<()> {
@@ -409,7 +704,9 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   typeset -g _ASTER_PREVIEW_TICKS=0
   typeset -g _ASTER_PREVIEW_TARGET=""
   typeset -g _ASTER_PREVIEW_PATH=""
+  typeset -g _ASTER_PREVIEW_COMMAND=""
   typeset -ga _ASTER_PREVIEW_LINES=()
+  typeset -ga _ASTER_PREVIEW_STYLES=()
   typeset -g _ASTER_UTF8_UI=0
   typeset -g _ASTER_CHARMAP="${(U)$(command locale charmap 2>/dev/null)}"
   [[ "$_ASTER_CHARMAP" == *UTF-8* || "$_ASTER_CHARMAP" == *UTF8* ]] && _ASTER_UTF8_UI=1
@@ -501,11 +798,13 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     _aster_preview_cancel
     _ASTER_PREVIEW_TARGET=""
     _ASTER_PREVIEW_PATH=""
+    _ASTER_PREVIEW_COMMAND=""
     _ASTER_PREVIEW_LINES=()
+    _ASTER_PREVIEW_STYLES=()
   }
 
   _aster_preview_consider() {
-    local display source target path
+    local display source target path command_name alias_command
     if (( ${COLUMNS:-80} < 100 || ! _ASTER_MENU_ACTIVE )); then
       _aster_preview_clear
       return
@@ -516,7 +815,14 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     [[ "$target" == "$_ASTER_PREVIEW_TARGET" ]] && return
     _aster_preview_clear
     _ASTER_PREVIEW_TARGET="$target"
-    if [[ "$source" == native ]]; then
+    command_name="${${display%%[[:space:]]*}:t}"
+    alias_command="${aliases[ls]:-}"
+    if [[ "$command_name" == ls &&
+          ( "$alias_command" == eza || "$alias_command" == "eza "* ) ]]; then
+      _ASTER_PREVIEW_COMMAND="${alias_command}${display#$command_name}"
+    elif [[ "$command_name" == ls || "$command_name" == gls || "$command_name" == eza ]]; then
+      _ASTER_PREVIEW_COMMAND="$display"
+    elif [[ "$source" == native ]]; then
       path="${display##* }"
       [[ -n "$path" ]] || return
       _ASTER_PREVIEW_PATH="$path"
@@ -524,25 +830,42 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   }
 
   _aster_preview_ready() {
-    local fd="$1" line
-    local -a lines
+    local fd="$1" line style
+    local styled=$(( ${#_ASTER_PREVIEW_COMMAND} > 0 ))
+    local -a lines styles
     if (( fd != _ASTER_PREVIEW_FD )); then
       zle -F "$fd" 2>/dev/null
       exec {fd}<&-
       return 0
     fi
     zle -F "$fd"
-    while IFS= read -r -u "$fd" -d '' line; do
-      lines+=("$line")
-      (( ${#lines} >= 10 )) && break
-    done
+    if (( styled )); then
+      while IFS= read -r -u "$fd" -d '' line &&
+            IFS= read -r -u "$fd" -d '' style; do
+        lines+=("$line")
+        styles+=("$style")
+        (( ${#lines} >= 8 )) && break
+      done
+    else
+      while IFS= read -r -u "$fd" -d '' line; do
+        lines+=("$line")
+        styles+=("")
+        (( ${#lines} >= 8 )) && break
+      done
+    fi
     exec {fd}<&-
     _ASTER_PREVIEW_FD=-1
     _ASTER_PREVIEW_PID=-1
     _ASTER_PREVIEW_TICKS=0
     _ASTER_PREVIEW_PATH=""
-    (( ${#lines} )) && _ASTER_PREVIEW_LINES=("${lines[@]}") || \
+    _ASTER_PREVIEW_COMMAND=""
+    if (( ${#lines} )); then
+      _ASTER_PREVIEW_LINES=("${lines[@]}")
+      _ASTER_PREVIEW_STYLES=("${styles[@]}")
+    else
       _ASTER_PREVIEW_LINES=("Preview unavailable")
+      _ASTER_PREVIEW_STYLES=("")
+    fi
     _aster_menu_publish
   }
 
@@ -809,13 +1132,13 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     local preview_source="${_ASTER_MENU_SOURCES[$_ASTER_MENU_INDEX]}"
     local preview_description="${_ASTER_MENU_DESCRIPTIONS[$_ASTER_MENU_INDEX]}"
     local show_preview=0
-    if [[ "$preview_source" == command && -n "$preview_description" &&
+    if [[ ${#_ASTER_PREVIEW_LINES} -gt 0 &&
+          "${_ASTER_PREVIEW_LINES[1]}" != "Preview unavailable" &&
+          "${_ASTER_PREVIEW_LINES[1]}" != "Preview timed out" ]]; then
+      show_preview=1
+    elif [[ "$preview_source" == command && -n "$preview_description" &&
           "$preview_description" != "System command" &&
           "$preview_description" != "Executable installed by "* ]]; then
-      show_preview=1
-    elif [[ "$preview_source" == native && ${#_ASTER_PREVIEW_LINES} -gt 0 &&
-            "${_ASTER_PREVIEW_LINES[1]}" != "Preview unavailable" &&
-            "${_ASTER_PREVIEW_LINES[1]}" != "Preview timed out" ]]; then
       show_preview=1
     fi
     if (( ${COLUMNS:-80} >= 100 && show_preview )); then
@@ -823,6 +1146,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       (( preview_width > 96 )) && preview_width=96
       if (( preview_width >= 40 )); then
         local preview_label=" Preview: ${selected} " preview_top preview_bottom preview_line
+        local preview_style style_span style_start style_end style_value style_rest
         local preview_content_width=$(( preview_width - 4 ))
         local -a preview_lines
         if (( ${#_ASTER_PREVIEW_LINES} )); then
@@ -850,6 +1174,18 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
           region_highlight+=("$line_start $(( line_start + 1 )) fg=__ASTER_UI_BORDER__ memo=aster")
           region_highlight+=("$(( line_start + 1 )) $(( line_start + ${#row} - 1 )) fg=__ASTER_UI_TEXT__ memo=aster")
           region_highlight+=("$(( line_start + ${#row} - 1 )) $(( line_start + ${#row} )) fg=__ASTER_UI_BORDER__ memo=aster")
+          preview_style="${_ASTER_PREVIEW_STYLES[$preview_index]}"
+          for style_span in ${(s:;:)preview_style}; do
+            style_start="${style_span%%:*}"
+            style_rest="${style_span#*:}"
+            style_end="${style_rest%%:*}"
+            style_value="${style_rest#*:}"
+            [[ "$style_start" == <-> && "$style_end" == <-> && -n "$style_value" ]] || continue
+            (( style_start >= ${#preview_line} )) && continue
+            (( style_end > ${#preview_line} )) && style_end=${#preview_line}
+            (( style_start < style_end )) && \
+              region_highlight+=("$(( line_start + 2 + style_start )) $(( line_start + 2 + style_end )) ${style_value} memo=aster")
+          done
         done
         printf -v fill '%*s' "$(( preview_width - 2 ))" ""
         fill="${fill// /$horizontal}"
@@ -1336,13 +1672,19 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       return 0
     fi
     (( _ASTER_IN_NATIVE_COMPLETION )) && return 0
-    if [[ -n "$_ASTER_PREVIEW_PATH" ]]; then
+    if [[ -n "$_ASTER_PREVIEW_PATH" || -n "$_ASTER_PREVIEW_COMMAND" ]]; then
       (( _ASTER_PREVIEW_TICKS++ ))
       if (( _ASTER_PREVIEW_FD < 0 && _ASTER_PREVIEW_TICKS >= 2 )); then
         local preview_fd
-        exec {preview_fd}< <(command aster preview-file \
-          --path "$_ASTER_PREVIEW_PATH" \
-          --cwd "$PWD" 2>/dev/null)
+        if [[ -n "$_ASTER_PREVIEW_COMMAND" ]]; then
+          exec {preview_fd}< <(command aster preview-command \
+            --line "$_ASTER_PREVIEW_COMMAND" \
+            --cwd "$PWD" 2>/dev/null)
+        else
+          exec {preview_fd}< <(command aster preview-file \
+            --path "$_ASTER_PREVIEW_PATH" \
+            --cwd "$PWD" 2>/dev/null)
+        fi
         _ASTER_PREVIEW_FD="$preview_fd"
         _ASTER_PREVIEW_PID=$!
         _ASTER_PREVIEW_TICKS=0
@@ -1350,7 +1692,9 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       elif (( _ASTER_PREVIEW_FD >= 0 && _ASTER_PREVIEW_TICKS > 34 )); then
         _aster_preview_cancel
         _ASTER_PREVIEW_PATH=""
+        _ASTER_PREVIEW_COMMAND=""
         _ASTER_PREVIEW_LINES=("Preview timed out")
+        _ASTER_PREVIEW_STYLES=("")
         zle -R
       fi
     fi
@@ -1455,6 +1799,12 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     POSTDISPLAY=""
     zle _aster-native-bracketed-paste
     _aster_menu_refresh
+  }
+
+  _aster_interrupt() {
+    _aster_menu_clear
+    POSTDISPLAY=""
+    zle _aster-native-interrupt
   }
 
   _aster_tab() {
@@ -1623,6 +1973,10 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     zle -A "$_ASTER_PREVIOUS_SPACE" _aster-native-space
     zle -A backward-delete-char _aster-native-backward-delete
     zle -A bracketed-paste _aster-native-bracketed-paste
+    typeset -g _ASTER_PREVIOUS_INTERRUPT="${$(bindkey '^C')##* }"
+    [[ -z "$_ASTER_PREVIOUS_INTERRUPT" || "$_ASTER_PREVIOUS_INTERRUPT" == "undefined-key" ]] && \
+      _ASTER_PREVIOUS_INTERRUPT=send-break
+    zle -A "$_ASTER_PREVIOUS_INTERRUPT" _aster-native-interrupt
     typeset -g _ASTER_PREVIOUS_TAB="${$(bindkey '^I')##* }"
     [[ -z "$_ASTER_PREVIOUS_TAB" || "$_ASTER_PREVIOUS_TAB" == "undefined-key" ]] && \
       _ASTER_PREVIOUS_TAB=expand-or-complete
@@ -1650,6 +2004,15 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     fi
     zle -A "$_ASTER_PREVIOUS_ESCAPE" _aster-native-escape
   fi
+  if [[ -z "${widgets[_aster-native-interrupt]:-}" ]]; then
+    if [[ -z "${_ASTER_PREVIOUS_INTERRUPT:-}" || "$_ASTER_PREVIOUS_INTERRUPT" == aster-interrupt ]]; then
+      typeset -g _ASTER_PREVIOUS_INTERRUPT="${$(bindkey '^C')##* }"
+      [[ -z "$_ASTER_PREVIOUS_INTERRUPT" || "$_ASTER_PREVIOUS_INTERRUPT" == "undefined-key" ||
+            "$_ASTER_PREVIOUS_INTERRUPT" == aster-interrupt ]] && \
+        _ASTER_PREVIOUS_INTERRUPT=send-break
+    fi
+    zle -A "$_ASTER_PREVIOUS_INTERRUPT" _aster-native-interrupt
+  fi
   zle -N aster-tab _aster_tab
   bindkey '^I' aster-tab
   zle -N aster-complete _aster_complete
@@ -1665,11 +2028,13 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   zle -N aster-space _aster_space
   zle -N backward-delete-char _aster_backward_delete
   zle -N bracketed-paste _aster_bracketed_paste
+  zle -N aster-interrupt _aster_interrupt
   bindkey '__ASTER_COMPLETION_KEY__' aster-complete
   bindkey '^N' aster-menu-down
   bindkey '^K' aster-menu-up
   bindkey '^[[Z' aster-shift-tab
   bindkey '^[' aster-escape
+  bindkey '^C' aster-interrupt
   bindkey ' ' aster-space
   bindkey -N aster-fuzzy
   bindkey -M aster-fuzzy -R ' '-'~' self-insert
@@ -1681,6 +2046,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   bindkey -M aster-fuzzy '^K' aster-menu-up
   bindkey -M aster-fuzzy '__ASTER_COMPLETION_KEY__' aster-complete
   bindkey -M aster-fuzzy '^M' aster-complete
+  bindkey -M aster-fuzzy '^C' aster-interrupt
   bindkey -M aster-fuzzy '^[' aster-escape
 
   if [[ -n "${HISTFILE:-}" && -r "$HISTFILE" ]]; then
@@ -1716,6 +2082,65 @@ fi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn previews_ls_without_a_shell() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("alpha.txt"), "alpha").unwrap();
+        fs::write(directory.path().join("beta.txt"), "beta").unwrap();
+
+        let lines = command_preview_lines("ls", directory.path().to_owned()).unwrap();
+        let preview = lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(preview.contains("alpha.txt"));
+        assert!(preview.contains("beta.txt"));
+    }
+
+    #[test]
+    fn command_preview_rejects_shell_syntax_and_other_commands() {
+        let directory = tempdir().unwrap();
+        assert!(command_preview_lines("ls; rm -rf /", directory.path().to_owned()).is_err());
+        assert!(command_preview_lines("echo hello", directory.path().to_owned()).is_err());
+        assert!(command_preview_lines("/bin/ls", directory.path().to_owned()).is_err());
+    }
+
+    #[test]
+    fn eza_preview_forces_colored_bounded_output() {
+        let (executable, arguments) = command_preview_argv(
+            "eza -l -G --icons=always --colour=always --hyperlink preview-target",
+        )
+        .unwrap();
+        assert_eq!(executable, "eza");
+        assert!(arguments.contains(&"-l".to_owned()));
+        assert!(arguments.contains(&"-G".to_owned()));
+        assert!(arguments.contains(&"preview-target".to_owned()));
+        assert!(arguments.contains(&"--color=always".to_owned()));
+        assert!(arguments.contains(&"--icons=never".to_owned()));
+        assert!(arguments.contains(&"--width=80".to_owned()));
+        assert!(!arguments.iter().any(|argument| argument == "--hyperlink"));
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument == "--icons=always")
+        );
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument == "--colour=always")
+        );
+    }
+
+    #[test]
+    fn converts_ansi_colors_to_zle_style_spans() {
+        let line =
+            parse_ansi_preview_line("\x1b[31;1mred\x1b[0m plain \x1b[38;2;1;2;3;4mcolor\x1b[0m");
+        assert_eq!(line.text, "red plain color");
+        assert_eq!(line.styles, "0:3:fg=1,bold;10:15:fg=#010203,underline");
+    }
 
     #[test]
     fn zsh_integration_uses_configured_completion_key() {

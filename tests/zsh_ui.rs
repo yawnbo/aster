@@ -19,8 +19,10 @@ fn popup_preserves_highlights_and_shell_bindings() {
     let temporary = tempdir().unwrap();
     let state = temporary.path().join("state");
     let zdotdir = temporary.path().join("zsh");
+    let helper_bin = temporary.path().join("bin");
     fs::create_dir(&state).unwrap();
     fs::create_dir(&zdotdir).unwrap();
+    fs::create_dir(&helper_bin).unwrap();
     fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&zdotdir, fs::Permissions::from_mode(0o700)).unwrap();
 
@@ -29,13 +31,22 @@ fn popup_preserves_highlights_and_shell_bindings() {
     let state_dump = temporary.path().join("zle-state");
     let preview_file = temporary.path().join("preview-target.txt");
     fs::write(&preview_file, "preview-first-line\npreview-second-line\n").unwrap();
+    let fake_eza = helper_bin.join("eza");
+    fs::write(
+        &fake_eza,
+        "#!/bin/sh\nprintf '\\033[31meza-alias-preview\\033[0m\\npreview-target.txt\\n'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_eza, fs::Permissions::from_mode(0o755)).unwrap();
     let path = format!(
-        "{}:{}",
+        "{}:{}:{}",
+        helper_bin.display(),
         binary_directory.display(),
         std::env::var("PATH").unwrap_or_default()
     );
     let zshrc = format!(
-        r#"autoload -Uz add-zle-hook-widget compinit
+        r#"export PATH={helper_bin}:$PATH
+autoload -Uz add-zle-hook-widget compinit
 compinit
 _aster_test_highlight() {{
   region_highlight=( "${{(@)region_highlight:#*memo=foreign-test*}}" )
@@ -55,6 +66,7 @@ _aster_test_file() {{
   compadd {preview_file}
 }}
 compdef _aster_test_file aster-preview-fixture
+alias ls=eza
 eval "$({aster} init zsh)"
 _aster_test_dump_state() {{
   print -r -- "$_ASTER_MENU_ACTIVE|${{#_ASTER_MENU_ACCEPTS}}|$_ASTER_MENU_BUFFER|$BUFFER|${{_ASTER_MENU_ACCEPTS[1]}}|$_ASTER_MENU_INDEX|${{_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}}|$_ASTER_FUZZY_ACTIVE|$_ASTER_FUZZY_BASE|$_ASTER_FUZZY_QUERY|$_ASTER_PREVIEW_FD|$_ASTER_PREVIEW_TICKS|$_ASTER_PREVIEW_PATH|${{(j:;:)_ASTER_PREVIEW_LINES}}" > {state_dump}
@@ -65,6 +77,7 @@ bindkey -M aster-fuzzy '^X^D' _aster_test_dump_state
 PROMPT='%# '
 "#,
         aster = shell_quote(aster.to_str().unwrap()),
+        helper_bin = shell_quote(helper_bin.to_str().unwrap()),
         preview_file = shell_quote(preview_file.to_str().unwrap()),
         state_dump = shell_quote(state_dump.to_str().unwrap())
     );
@@ -449,6 +462,25 @@ PROMPT='%# '
         .status()
         .unwrap();
     assert!(status.success(), "failed to seed fuzzy history");
+    let ls_history = format!("ls {}", temporary.path().display());
+    let status = Command::new(aster)
+        .args([
+            "record",
+            "--command",
+            &ls_history,
+            "--cwd",
+            temporary.path().to_str().unwrap(),
+            "--exit-code",
+            "0",
+            "--session",
+            "preview-test",
+        ])
+        .env("ASTER_CONFIG", &config)
+        .env("ASTER_STATE_DIR", &state)
+        .env("ASTER_SOCKET", &socket)
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to seed ls preview history");
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
@@ -555,6 +587,35 @@ PROMPT='%# '
     assert!(
         !history_capture.contains("Preview:"),
         "history-only suggestions opened an unnecessary preview:\n{history_capture}"
+    );
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(50));
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0", "ls "])
+        .status()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut command_preview_capture = String::new();
+    while Instant::now() < deadline {
+        command_preview_capture = capture_pane(&server, true);
+        if command_preview_capture.contains("eza-alias-preview")
+            && command_preview_capture.contains("\u{1b}[31meza-alias-preview")
+            && command_preview_capture.contains("preview-target.txt")
+            && command_preview_capture.contains("Preview:")
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        command_preview_capture.contains("eza-alias-preview")
+            && command_preview_capture.contains("\u{1b}[31meza-alias-preview")
+            && command_preview_capture.contains("preview-target.txt")
+            && command_preview_capture.contains("Preview:"),
+        "safe eza-backed ls command preview was absent:\n{command_preview_capture}"
     );
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
