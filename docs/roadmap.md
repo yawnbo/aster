@@ -28,7 +28,7 @@
 - Candidate kinds, descriptions, provenance, and scrolling viewport.
 - Partial acceptance and immediate re-query.
 - Debounced asynchronous requests with stale-result rejection.
-- Preserve actual foreground-command and tmux title behavior.
+- Preserve foreground-command behavior without taking ownership of tmux titles.
 
 ## Phase 4: Explicit Dynamic Providers
 

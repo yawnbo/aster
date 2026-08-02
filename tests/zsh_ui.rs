@@ -124,6 +124,45 @@ PROMPT='%# '
 
     thread::sleep(Duration::from_millis(300));
     let status = Command::new("tmux")
+        .args([
+            "-L",
+            &server,
+            "select-pane",
+            "-t",
+            "test:0.0",
+            "-T",
+            "user-title",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to set the test pane title");
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0", ":"])
+        .status()
+        .unwrap();
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "Enter"])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(100));
+    let pane_title = Command::new("tmux")
+        .args([
+            "-L",
+            &server,
+            "display-message",
+            "-p",
+            "-t",
+            "test:0.0",
+            "#{pane_title}",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(pane_title.stdout).unwrap().trim(),
+        "user-title",
+        "Aster overwrote a user-owned tmux pane title"
+    );
+    let status = Command::new("tmux")
         .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0", "aste"])
         .status()
         .unwrap();

@@ -172,20 +172,9 @@ description-only until they receive a separately reviewed provider.
 
 ## tmux Titles
 
-Aster owns the per-pane title only while Zsh is idle at the prompt. The Zsh
-integration sets `pane_title` to `aster` during `precmd`, changes it to the
-submitted command during `preexec`, and lets applications replace it while they
-run. `ASTER_TMUX_SHELL_TITLE` can customize the idle title.
-
-This uses `tmux select-pane -T`, not `rename-window`, so Aster does not disable or
-replace tmux's automatic window naming. A future PTY-based interface must follow
-the same lifecycle and must never leave panes titled `aster` while another
-foreground command is active.
-
-The dotfile tmux integration sets `automatic-rename-format` to `#{pane_title}`.
-This lets status themes that display the automatic window name show `aster`
-while Zsh is idle and the foreground command while it runs, without placing a
-wrapper process between tmux and Zsh.
+Aster never changes `pane_title`, window names, `automatic-rename`, or status
+formats. Those values remain under tmux and the foreground application's control.
+The Zsh hooks use `TMUX_PANE` only as part of the history session identifier.
 
 ## Daemon Lifecycle
 

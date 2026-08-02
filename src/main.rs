@@ -727,18 +727,9 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   typeset -ga _ASTER_NATIVE_DISPLAYS=()
   typeset -ga _ASTER_NATIVE_DESCRIPTIONS=()
 
-  _aster_tmux_title() {
-    if [[ -n "${TMUX_PANE:-}" ]] && (( $+commands[tmux] )); then
-      command tmux select-pane -t "$TMUX_PANE" -T "$1" >/dev/null 2>&1
-    fi
-    return 0
-  }
-
   _aster_preexec() {
-    local command_name="${${1%%[[:space:]]*}:t}"
     _ASTER_COMMAND="$1"
     _ASTER_COMMAND_CWD="$PWD"
-    _aster_tmux_title "${command_name:-command}"
     return 0
   }
 
@@ -754,7 +745,6 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       _ASTER_COMMAND=""
       _ASTER_COMMAND_CWD=""
     fi
-    _aster_tmux_title "${ASTER_TMUX_SHELL_TITLE:-aster}"
     return 0
   }
 
@@ -2155,6 +2145,8 @@ mod tests {
         assert!(integration.contains("descriptions+=(\"Zsh completion\")"));
         assert!(integration.contains("${(@)region_highlight:#*memo=aster*}"));
         assert!(integration.contains("_ASTER_FOREIGN_HIGHLIGHTS"));
+        assert!(!integration.contains("select-pane"));
+        assert!(!integration.contains("ASTER_TMUX_SHELL_TITLE"));
         assert!(!integration.contains("aster-menu-enter"));
         assert!(!integration.contains("bindkey '^M'"));
         assert!(!integration.contains("__ASTER_COMPLETION_KEY__"));

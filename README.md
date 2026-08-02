@@ -80,8 +80,8 @@ The integration:
   prior widgets remain active.
 - Accepts the full suggestion with Ctrl-Space, or the shortest next segment with
   Tab; Enter remains the shell's untouched command-submission binding.
-- Labels the tmux pane `aster` only while Zsh is idle, then switches the pane
-  title to the foreground command until the prompt returns.
+- Leaves tmux pane titles and automatic window naming entirely under tmux and
+  the foreground application's control.
 
 Aster owns ZLE's suggestion display. Do not load a second autosuggestion plugin
 alongside it; competing `POSTDISPLAY` highlights can recolor or stale the menu.
@@ -184,7 +184,6 @@ Paths can be overridden for testing or custom deployments:
 | `ASTER_CONFIG` | Configuration file |
 | `ASTER_STATE_DIR` | SQLite database and daemon log directory |
 | `ASTER_SOCKET` | Unix socket path |
-| `ASTER_TMUX_SHELL_TITLE` | Pane title used while Zsh is at the prompt |
 | `XDG_CONFIG_HOME` | Default config root |
 | `XDG_STATE_HOME` | Default state root |
 
