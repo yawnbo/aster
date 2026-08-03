@@ -695,6 +695,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   typeset -g _ASTER_MENU_REQUEST_CWD=""
   typeset -g _ASTER_MENU_REQUEST_CURSOR=0
   typeset -g _ASTER_MENU_REQUEST_FD=-1
+  typeset -g _ASTER_MENU_INFLIGHT_BUFFER=""
+  typeset -g _ASTER_MENU_INFLIGHT_CURSOR=0
   typeset -g _ASTER_MENU_REQUEST_DIRTY=0
   typeset -g _ASTER_MENU_REFRESH_TICKS=0
   typeset -g _ASTER_MENU_RESTORE_INDEX=1
@@ -707,6 +709,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   typeset -g _ASTER_NATIVE_REQUEST_TICKS=0
   typeset -g _ASTER_NATIVE_START_TICKS=0
   typeset -g _ASTER_NATIVE_REQUESTED=0
+  typeset -g _ASTER_NATIVE_INFLIGHT_BUFFER=""
+  typeset -g _ASTER_NATIVE_INFLIGHT_CURSOR=0
   typeset -g _ASTER_IN_NATIVE_COMPLETION=0
   typeset -g _ASTER_FUZZY_ACTIVE=0
   typeset -g _ASTER_FUZZY_BASE=""
@@ -769,6 +773,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       exec {fd}<&-
     fi
     _ASTER_MENU_REQUEST_FD=-1
+    _ASTER_MENU_INFLIGHT_BUFFER=""
+    _ASTER_MENU_INFLIGHT_CURSOR=0
   }
 
   _aster_native_cancel() {
@@ -784,6 +790,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     _ASTER_NATIVE_REQUEST_PID=-1
     _ASTER_NATIVE_REQUEST_TICKS=0
     _ASTER_NATIVE_START_TICKS=0
+    _ASTER_NATIVE_INFLIGHT_BUFFER=""
+    _ASTER_NATIVE_INFLIGHT_CURSOR=0
   }
 
   _aster_preview_cancel() {
@@ -1566,10 +1574,18 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       exec {fd}<&-
       return 0
     fi
+    if [[ "$_ASTER_MENU_BUFFER" != "$_ASTER_MENU_INFLIGHT_BUFFER" ]]; then
+      zle -F "$fd" 2>/dev/null
+      exec {fd}<&-
+      _ASTER_MENU_REQUEST_FD=-1
+      _ASTER_MENU_INFLIGHT_BUFFER=""
+      _ASTER_MENU_INFLIGHT_CURSOR=0
+      return 0
+    fi
 
     zle -F "$fd"
-    BUFFER="$_ASTER_MENU_REQUEST_BUFFER"
-    CURSOR=$_ASTER_MENU_REQUEST_CURSOR
+    BUFFER="$_ASTER_MENU_INFLIGHT_BUFFER"
+    CURSOR=$_ASTER_MENU_INFLIGHT_CURSOR
     if IFS= read -r -u "$fd" -d '' response_pending && [[ "$response_pending" == true ]]; then
       any_pending=1
     fi
@@ -1611,10 +1627,20 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       exec {fd}<&-
       return 0
     fi
+    if [[ "$_ASTER_MENU_BUFFER" != "$_ASTER_NATIVE_INFLIGHT_BUFFER" ]]; then
+      zle -F "$fd" 2>/dev/null
+      exec {fd}<&-
+      _ASTER_NATIVE_REQUEST_FD=-1
+      _ASTER_NATIVE_REQUEST_PID=-1
+      _ASTER_NATIVE_REQUEST_TICKS=0
+      _ASTER_NATIVE_INFLIGHT_BUFFER=""
+      _ASTER_NATIVE_INFLIGHT_CURSOR=0
+      return 0
+    fi
 
     zle -F "$fd"
-    BUFFER="$_ASTER_MENU_REQUEST_BUFFER"
-    CURSOR=$_ASTER_MENU_REQUEST_CURSOR
+    BUFFER="$_ASTER_NATIVE_INFLIGHT_BUFFER"
+    CURSOR=$_ASTER_NATIVE_INFLIGHT_CURSOR
     while IFS= read -r -u "$fd" -d '' accept &&
           IFS= read -r -u "$fd" -d '' display &&
           IFS= read -r -u "$fd" -d '' description; do
@@ -1837,6 +1863,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       (( _ASTER_NATIVE_START_TICKS++ ))
       if (( _ASTER_NATIVE_START_TICKS >= 2 )) && (( $+functions[_main_complete] )); then
         _ASTER_NATIVE_REQUESTED=1
+        _ASTER_NATIVE_INFLIGHT_BUFFER="$_ASTER_MENU_REQUEST_BUFFER"
+        _ASTER_NATIVE_INFLIGHT_CURSOR=$_ASTER_MENU_REQUEST_CURSOR
         _aster_call_native_completion aster-native-capture
       fi
     fi
@@ -1856,6 +1884,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     fi
 
     _aster_menu_cancel_query
+    _ASTER_MENU_INFLIGHT_BUFFER="$buffer"
+    _ASTER_MENU_INFLIGHT_CURSOR=$cursor
     if (( _ASTER_FUZZY_ACTIVE )); then
       exec {query_fd}< <(command aster fuzzy \
         --query "$_ASTER_FUZZY_QUERY" \
@@ -2040,6 +2070,31 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     zle _aster-native-escape
   }
 
+  _aster_history_move() {
+    local native_widget="$1"
+    _aster_menu_clear 1
+    POSTDISPLAY=""
+    zle "$native_widget"
+    _ASTER_MENU_BUFFER="$BUFFER"
+    zle -R
+  }
+
+  _aster_history_up() {
+    _aster_history_move _aster-native-history-up
+  }
+
+  _aster_history_up_application() {
+    _aster_history_move _aster-native-history-up-application
+  }
+
+  _aster_history_down() {
+    _aster_history_move _aster-native-history-down
+  }
+
+  _aster_history_down_application() {
+    _aster_history_move _aster-native-history-down-application
+  }
+
   _aster_menu_pre_redraw() {
     if (( _ASTER_CAPTURE_FOREIGN_HIGHLIGHTS )); then
       _ASTER_FOREIGN_HIGHLIGHTS=( "${(@)region_highlight:#*memo=aster*}" )
@@ -2096,6 +2151,10 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     typeset -g _ASTER_PREVIOUS_UP="${$(bindkey '^K')##* }"
     typeset -g _ASTER_PREVIOUS_SHIFT_TAB="${$(bindkey '^[[Z')##* }"
     typeset -g _ASTER_PREVIOUS_ESCAPE="${$(bindkey '^[')##* }"
+    typeset -g _ASTER_PREVIOUS_HISTORY_UP="${$(bindkey '^[[A')##* }"
+    typeset -g _ASTER_PREVIOUS_HISTORY_UP_APPLICATION="${$(bindkey '^[OA')##* }"
+    typeset -g _ASTER_PREVIOUS_HISTORY_DOWN="${$(bindkey '^[[B')##* }"
+    typeset -g _ASTER_PREVIOUS_HISTORY_DOWN_APPLICATION="${$(bindkey '^[OB')##* }"
     [[ -z "$_ASTER_PREVIOUS_DOWN" || "$_ASTER_PREVIOUS_DOWN" == "undefined-key" ]] && \
       _ASTER_PREVIOUS_DOWN=down-line-or-history
     [[ -z "$_ASTER_PREVIOUS_UP" || "$_ASTER_PREVIOUS_UP" == "undefined-key" ]] && \
@@ -2103,11 +2162,25 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     [[ -z "$_ASTER_PREVIOUS_SHIFT_TAB" || "$_ASTER_PREVIOUS_SHIFT_TAB" == "undefined-key" ]] && \
       _ASTER_PREVIOUS_SHIFT_TAB=reverse-menu-complete
     [[ -z "$_ASTER_PREVIOUS_ESCAPE" ]] && _ASTER_PREVIOUS_ESCAPE=undefined-key
+    [[ -z "$_ASTER_PREVIOUS_HISTORY_UP" || "$_ASTER_PREVIOUS_HISTORY_UP" == "undefined-key" ]] && \
+      _ASTER_PREVIOUS_HISTORY_UP=up-line-or-history
+    [[ -z "$_ASTER_PREVIOUS_HISTORY_UP_APPLICATION" ||
+       "$_ASTER_PREVIOUS_HISTORY_UP_APPLICATION" == "undefined-key" ]] && \
+      _ASTER_PREVIOUS_HISTORY_UP_APPLICATION=$_ASTER_PREVIOUS_HISTORY_UP
+    [[ -z "$_ASTER_PREVIOUS_HISTORY_DOWN" || "$_ASTER_PREVIOUS_HISTORY_DOWN" == "undefined-key" ]] && \
+      _ASTER_PREVIOUS_HISTORY_DOWN=down-line-or-history
+    [[ -z "$_ASTER_PREVIOUS_HISTORY_DOWN_APPLICATION" ||
+       "$_ASTER_PREVIOUS_HISTORY_DOWN_APPLICATION" == "undefined-key" ]] && \
+      _ASTER_PREVIOUS_HISTORY_DOWN_APPLICATION=$_ASTER_PREVIOUS_HISTORY_DOWN
     zle -A "$_ASTER_PREVIOUS_TRIGGER" _aster-native-trigger
     zle -A "$_ASTER_PREVIOUS_DOWN" _aster-native-down
     zle -A "$_ASTER_PREVIOUS_UP" _aster-native-up
     zle -A "$_ASTER_PREVIOUS_SHIFT_TAB" _aster-native-shift-tab
     zle -A "$_ASTER_PREVIOUS_ESCAPE" _aster-native-escape
+    zle -A "$_ASTER_PREVIOUS_HISTORY_UP" _aster-native-history-up
+    zle -A "$_ASTER_PREVIOUS_HISTORY_UP_APPLICATION" _aster-native-history-up-application
+    zle -A "$_ASTER_PREVIOUS_HISTORY_DOWN" _aster-native-history-down
+    zle -A "$_ASTER_PREVIOUS_HISTORY_DOWN_APPLICATION" _aster-native-history-down-application
     zle -A self-insert _aster-native-self-insert
     typeset -g _ASTER_PREVIOUS_SPACE="${$(bindkey ' ')##* }"
     [[ -z "$_ASTER_PREVIOUS_SPACE" || "$_ASTER_PREVIOUS_SPACE" == "undefined-key" ]] && \
@@ -2162,6 +2235,10 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   zle -N aster-menu-up _aster_menu_up
   zle -N aster-shift-tab _aster_shift_tab
   zle -N aster-escape _aster_escape
+  zle -N aster-history-up _aster_history_up
+  zle -N aster-history-up-application _aster_history_up_application
+  zle -N aster-history-down _aster_history_down
+  zle -N aster-history-down-application _aster_history_down_application
   zle -N aster-menu-ready _aster_menu_request_ready
   zle -N aster-menu-apply _aster_menu_apply_result
   zle -N aster-menu-tick _aster_menu_tick
@@ -2176,6 +2253,10 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   bindkey '^K' aster-menu-up
   bindkey '^[[Z' aster-shift-tab
   bindkey '^[' aster-escape
+  bindkey '^[[A' aster-history-up
+  bindkey '^[OA' aster-history-up-application
+  bindkey '^[[B' aster-history-down
+  bindkey '^[OB' aster-history-down-application
   bindkey '^C' aster-interrupt
   bindkey ' ' aster-space
   bindkey -N aster-fuzzy
@@ -2186,6 +2267,10 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   bindkey -M aster-fuzzy '^I' aster-tab
   bindkey -M aster-fuzzy '^N' aster-menu-down
   bindkey -M aster-fuzzy '^K' aster-menu-up
+  bindkey -M aster-fuzzy '^[[A' aster-menu-up
+  bindkey -M aster-fuzzy '^[OA' aster-menu-up
+  bindkey -M aster-fuzzy '^[[B' aster-menu-down
+  bindkey -M aster-fuzzy '^[OB' aster-menu-down
   bindkey -M aster-fuzzy '__ASTER_COMPLETION_KEY__' aster-complete
   bindkey -M aster-fuzzy '^M' aster-complete
   bindkey -M aster-fuzzy '^C' aster-interrupt

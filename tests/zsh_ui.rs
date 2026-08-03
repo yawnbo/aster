@@ -53,6 +53,20 @@ fn popup_preserves_highlights_and_shell_bindings() {
         r#"export PATH={helper_bin}:$PATH
 autoload -Uz add-zle-hook-widget compinit
 compinit -u
+_aster_test_history_up() {{
+  BUFFER=history-arrow-up
+  CURSOR=${{#BUFFER}}
+}}
+_aster_test_history_down() {{
+  BUFFER=history-arrow-down
+  CURSOR=${{#BUFFER}}
+}}
+zle -N _aster_test_history_up
+zle -N _aster_test_history_down
+bindkey '^[[A' _aster_test_history_up
+bindkey '^[OA' _aster_test_history_up
+bindkey '^[[B' _aster_test_history_down
+bindkey '^[OB' _aster_test_history_down
 _aster_test_highlight() {{
   region_highlight=( "${{(@)region_highlight:#*memo=foreign-test*}}" )
   [[ -n "$BUFFER" ]] && region_highlight+=("0 ${{#BUFFER}} fg=green memo=foreign-test")
@@ -288,6 +302,25 @@ PROMPT='%# '
         "async provider merging moved the menu away from row 1: {reordered_state:?}"
     );
     Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "Up"])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(350));
+    dump_zle_state(&server);
+    let history_up_state = fs::read_to_string(&state_dump).unwrap();
+    let history_up_fields: Vec<_> = history_up_state.trim_end().split('|').collect();
+    assert_eq!(history_up_fields[0], "0");
+    assert_eq!(history_up_fields[3], "history-arrow-up");
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "Down"])
+        .status()
+        .unwrap();
+    dump_zle_state(&server);
+    let history_down_state = fs::read_to_string(&state_dump).unwrap();
+    let history_down_fields: Vec<_> = history_down_state.trim_end().split('|').collect();
+    assert_eq!(history_down_fields[0], "0");
+    assert_eq!(history_down_fields[3], "history-arrow-down");
+    Command::new("tmux")
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
@@ -311,10 +344,18 @@ PROMPT='%# '
         .arg("\u{1b}[200~ pasted\u{1b}[201~")
         .status()
         .unwrap();
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0", " after"])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
     dump_zle_state(&server);
-    let pasted_state = fs::read_to_string(&state_dump).unwrap();
-    let pasted_fields: Vec<_> = pasted_state.trim_end().split('|').collect();
-    assert_eq!(pasted_fields[3], "echo before pasted");
+    let typed_after_paste = fs::read_to_string(&state_dump).unwrap();
+    let typed_after_paste_fields: Vec<_> = typed_after_paste.trim_end().split('|').collect();
+    assert_eq!(
+        typed_after_paste_fields[3], "echo before pasted after",
+        "typing after bracketed paste replaced the existing line"
+    );
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()

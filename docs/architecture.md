@@ -93,6 +93,8 @@ editing keymap, so character insertion and Backspace keep their ordinary
 behavior. Enter is never rebound. With no menu, Tab and Shift-Tab clear stale
 display state and delegate to the widgets they replaced. Native completion entry
 is serialized so the asynchronous ticker cannot recursively enter Zsh completion.
+Up and Down always delegate to the history widgets they replaced after cancelling
+menu requests, preventing stale callbacks from restoring the pre-history buffer.
 The integration snapshots native widgets only on first load, but reinstalls its
 functions, hooks, and bindings on every evaluation so sourcing `.zshrc` remains
 safe after `compinit` or other ZLE plugins recreate their wrappers.
@@ -108,8 +110,10 @@ delegating to the shell interrupt, and `line-init` resets that state again for
 every new prompt.
 
 Aster memo-tags only its own highlight regions. It preserves foreign regions
-across asynchronous FD callbacks and restores the request buffer before redraw,
-so syntax-highlighting plugins retain ownership of command-token colors.
+across asynchronous FD callbacks and restores an immutable in-flight buffer
+snapshot before redraw. Results are discarded when that snapshot no longer
+matches the live editing buffer, so stale completion cannot erase typing or
+pasted text and syntax-highlighting plugins retain command-token colors.
 
 The menu is anchored from a configurable prompt offset plus the live ZLE cursor
 and clamped before the terminal's final column. It renders a bounded

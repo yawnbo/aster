@@ -82,6 +82,8 @@ The integration:
 - Uses Ctrl-N and Ctrl-K to move through an open menu and updates inline ghost
   text to preview the selected row; outside the menu their prior widgets remain
   active.
+- Leaves Up and Down dedicated to their existing Zsh history widgets, cancelling
+  stale completion work before history changes the command buffer.
 - Accepts the full suggestion with Ctrl-Space, or the shortest next segment with
   Tab; Enter remains the shell's untouched command-submission binding.
 - Leaves tmux pane titles and automatic window naming entirely under tmux and
