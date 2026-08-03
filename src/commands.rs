@@ -24,6 +24,7 @@ const WORKER_COUNT: usize = 2;
 const SUCCESS_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const MISS_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const MAN_TIMEOUT: Duration = Duration::from_millis(1_500);
+#[cfg(target_os = "macos")]
 const HELP_TIMEOUT: Duration = Duration::from_millis(1_000);
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -624,6 +625,7 @@ fn parse_man_description(name: &str, output: &str) -> Option<String> {
     None
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_help_description(name: &str, output: &str) -> Option<String> {
     for line in clean_lines(output) {
         let lower = line.to_ascii_lowercase();

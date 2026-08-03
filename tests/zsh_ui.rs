@@ -71,9 +71,17 @@ _aster_test_file() {{
 }}
 compdef _aster_test_file aster-preview-fixture
 _aster_test_scp() {{
-  compadd file-alpha file-beta
+  if [[ "$PREFIX" == zz* ]]; then
+    compadd 'zzuser@example.com:/srv/app/file'
+  else
+    compadd file-alpha file-beta
+  fi
 }}
 compdef _aster_test_scp scp
+_aster_test_ssh() {{
+  compadd alice@example.com
+}}
+compdef _aster_test_ssh ssh
 alias ls=eza
 eval "$({aster} init zsh)"
 _aster_test_dump_state() {{
@@ -442,6 +450,71 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
+    thread::sleep(Duration::from_millis(300));
+    Command::new("tmux")
+        .args([
+            "-L",
+            &server,
+            "send-keys",
+            "-l",
+            "-t",
+            "test:0.0",
+            "ssh ali",
+        ])
+        .status()
+        .unwrap();
+    wait_for_pane(&server, "ssh alice@example.com");
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "Tab"])
+        .status()
+        .unwrap();
+    dump_zle_state(&server);
+    let ssh_user_state = fs::read_to_string(&state_dump).unwrap();
+    assert!(
+        ssh_user_state.contains("|ssh alice@|ssh alice@|example.com"),
+        "Tab did not stop after the SSH user boundary: {ssh_user_state:?}"
+    );
+
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(300));
+    Command::new("tmux")
+        .args([
+            "-L",
+            &server,
+            "send-keys",
+            "-l",
+            "-t",
+            "test:0.0",
+            "scp zzu",
+        ])
+        .status()
+        .unwrap();
+    wait_for_pane(&server, "scp zzuser@example.com:/srv/app/file");
+    for expected in [
+        "|scp zzuser@|scp zzuser@|example.com:/srv/app/file",
+        "|scp zzuser@example.com:/|scp zzuser@example.com:/|srv/app/file",
+        "|scp zzuser@example.com:/srv/|scp zzuser@example.com:/srv/|app/file",
+    ] {
+        Command::new("tmux")
+            .args(["-L", &server, "send-keys", "-t", "test:0.0", "Tab"])
+            .status()
+            .unwrap();
+        dump_zle_state(&server);
+        let remote_path_state = fs::read_to_string(&state_dump).unwrap();
+        assert!(
+            remote_path_state.contains(expected),
+            "Tab did not stop at remote path boundary {expected:?}: {remote_path_state:?}"
+        );
+    }
+
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(300));
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0"])
         .arg("aster-native-fixture na")
@@ -983,6 +1056,19 @@ fn dump_zle_state(server: &str) {
 
 fn capture_pane(server: &str, include_escape_sequences: bool) -> String {
     capture_target(server, "test:0.0", include_escape_sequences)
+}
+
+fn wait_for_pane(server: &str, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut capture = String::new();
+    while Instant::now() < deadline {
+        capture = capture_pane(server, false);
+        if capture.contains(expected) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("pane did not contain {expected:?}:\n{capture}");
 }
 
 fn cursor_x(server: &str, target: &str) -> usize {

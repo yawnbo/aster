@@ -131,9 +131,12 @@ ev/
 ```
 
 Aster then queries again from the new buffer. Pressing Ctrl-Space instead inserts
-the complete `ev/gitrepos/aster` remainder. The initial Tab boundary scanner is
-deliberately small and recognizes path and word delimiters; a shell-aware parser
-will replace it before mid-line editing is enabled.
+the complete `ev/gitrepos/aster` remainder. Tab also recognizes structured shell
+values. For example, `ssh ali` completes to `ssh alice@` before accepting the
+host, while `scp zzu` can advance through `zzuser@`, `example.com:/`, and each
+remote path component separately. Assignments, comma-separated values, URLs,
+rsync's `host::module` syntax, quoting, escaping, and bracketed IPv6 hosts use the
+same conservative boundary scanner.
 
 ## Commands
 

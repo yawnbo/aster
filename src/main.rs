@@ -1261,7 +1261,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
 
   _aster_next_segment() {
     local value="$1" character
-    local index saw_non_whitespace=0 escaped=0
+    local index boundary next quote=""
+    local saw_non_whitespace=0 escaped=0 bracket_depth=0
     REPLY="$value"
     for (( index = 1; index <= ${#value}; index++ )); do
       character="${value[$index]}"
@@ -1270,8 +1271,21 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
         saw_non_whitespace=1
         continue
       fi
-      if [[ "$character" == \\ ]]; then
+      if [[ "$character" == \\ && "$quote" != "'" ]]; then
         escaped=1
+        saw_non_whitespace=1
+        continue
+      fi
+      if [[ "$character" == "'" || "$character" == '"' ]]; then
+        if [[ "$quote" == "$character" ]]; then
+          quote=""
+        elif [[ -z "$quote" ]]; then
+          quote="$character"
+        fi
+        saw_non_whitespace=1
+        continue
+      fi
+      if [[ -n "$quote" ]]; then
         saw_non_whitespace=1
         continue
       fi
@@ -1283,9 +1297,33 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
         continue
       fi
       saw_non_whitespace=1
-      if [[ "$character" == [/:=,] ]]; then
-        REPLY="${value[1,$index]}"
-        return 0
+      if [[ "$character" == '[' ]]; then
+        (( bracket_depth++ ))
+      elif [[ "$character" == ']' ]]; then
+        (( bracket_depth > 0 )) && (( bracket_depth-- ))
+      elif (( bracket_depth == 0 )); then
+        if [[ "$character" == '@' || "$character" == '=' || "$character" == ',' ]]; then
+          REPLY="${value[1,$index]}"
+          return 0
+        fi
+        if [[ "$character" == ':' ]]; then
+          boundary=$index
+          while (( boundary < ${#value} )); do
+            next="${value[$(( boundary + 1 ))]}"
+            [[ "$next" == ':' || "$next" == '/' ]] || break
+            (( boundary++ ))
+          done
+          REPLY="${value[1,$boundary]}"
+          return 0
+        fi
+        if [[ "$character" == '/' ]]; then
+          boundary=$index
+          while (( boundary < ${#value} )) && [[ "${value[$(( boundary + 1 ))]}" == '/' ]]; do
+            (( boundary++ ))
+          done
+          REPLY="${value[1,$boundary]}"
+          return 0
+        fi
       fi
     done
   }
@@ -1313,7 +1351,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     LBUFFER+="$accept"
     if [[ ( "$source" == native || "$kind" == file || "$kind" == option ) &&
           "$BUFFER" == "$display" &&
-          "${BUFFER[-1]}" != [/:=,[:space:]] ]]; then
+          "${BUFFER[-1]}" != [@/:=,[:space:]] ]]; then
       LBUFFER+=" "
     fi
     POSTDISPLAY=""

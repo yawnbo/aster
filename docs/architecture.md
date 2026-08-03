@@ -81,9 +81,12 @@ normal multiline layout instead of being printed into terminal history. ZLE
 row using validated colors from the UI configuration. Ctrl-N and Ctrl-K move
 the selection; Shift-Tab cycles it, and the configured completion key accepts
 its configured amount and immediately queries again. Tab accepts the shortest
-next word or path segment while the menu is open. When multiple filesystem
-candidates are present, Tab leaves the buffer unchanged rather than computing a
-prefix from a potentially truncated menu or selecting an arbitrary first entry.
+next semantic segment while the menu is open. Boundaries include words, paths,
+assignments, lists, URLs, and remote destinations such as `user@host:/path`;
+quoted, escaped, and bracketed IPv6 separators remain intact. When multiple
+filesystem candidates are present, Tab leaves the buffer unchanged rather than
+computing a prefix from a potentially truncated menu or selecting an arbitrary
+first entry.
 After any accepted segment, the refreshed menu starts at row 1 rather than
 carrying its previous index forward. Selection does not change the
 editing keymap, so character insertion and Backspace keep their ordinary
