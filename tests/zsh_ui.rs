@@ -104,7 +104,7 @@ compdef _aster_test_long aster-command-with-a-very-long-name
 alias ls=eza
 eval "$({aster} init zsh)"
 _aster_test_dump_state() {{
-  print -r -- "$_ASTER_MENU_ACTIVE|${{#_ASTER_MENU_ACCEPTS}}|$_ASTER_MENU_BUFFER|$BUFFER|${{_ASTER_MENU_ACCEPTS[1]}}|$_ASTER_MENU_INDEX|${{_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}}|$_ASTER_FUZZY_ACTIVE|$_ASTER_FUZZY_BASE|$_ASTER_FUZZY_QUERY|$_ASTER_PREVIEW_FD|$_ASTER_PREVIEW_TICKS|$_ASTER_PREVIEW_PATH|${{(j:;:)_ASTER_PREVIEW_LINES}}|${{(j:;:)_ASTER_MENU_DISPLAYS}}|${{POSTDISPLAY%%$'\n'*}}" > {state_dump}
+  print -r -- "$_ASTER_MENU_ACTIVE|${{#_ASTER_MENU_ACCEPTS}}|$_ASTER_MENU_BUFFER|$BUFFER|${{_ASTER_MENU_ACCEPTS[1]}}|$_ASTER_MENU_INDEX|${{_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}}|$_ASTER_FUZZY_ACTIVE|$_ASTER_FUZZY_BASE|$_ASTER_FUZZY_QUERY|$_ASTER_PREVIEW_FD|$_ASTER_PREVIEW_TICKS|$_ASTER_PREVIEW_PATH|${{(j:;:)_ASTER_PREVIEW_LINES}}|${{(j:;:)_ASTER_MENU_DISPLAYS}}|${{POSTDISPLAY%%$'\n'*}}|${{(j:;:)_ASTER_MENU_SOURCES}}" > {state_dump}
 }}
 _aster_test_sync() {{
   : > {sync_file}
@@ -359,7 +359,9 @@ PROMPT='%# '
     let history_priority_fields: Vec<_> = history_priority_state.trim_end().split('|').collect();
     assert_eq!(history_priority_fields[6], "cargo release patch --execute");
     assert!(
-        history_priority_fields[14].contains("cargo release patch Cargo.toml"),
+        history_priority_fields[16]
+            .split(';')
+            .any(|source| source == "filesystem"),
         "filesystem fixture did not compete with history: {history_priority_state:?}"
     );
     Command::new("tmux")
