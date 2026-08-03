@@ -66,7 +66,8 @@ The integration:
   Aster's menu without blocking input.
 - Shows ranked candidates automatically as the command buffer changes.
 - Renders a bordered, color-highlighted menu and selected-candidate ghost text
-  as part of ZLE's multiline display.
+  as part of ZLE's multiline display. Long rows preserve the completion suffix,
+  rendering as `… suggestion` when the typed command prefix would hide it.
 - Adds a lazy preview box at 100 columns or wider only when useful content is
   available. History-only and generic rows stay compact; command details reuse
   the existing asynchronous description workers, and selected native text files

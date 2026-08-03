@@ -1031,10 +1031,21 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
         local compact_max_indent=$(( ${COLUMNS:-80} - compact_width - 1 ))
         (( compact_indent > compact_max_indent )) && compact_indent=$compact_max_indent
         (( compact_indent < 0 )) && compact_indent=0
-        local compact_padding compact_display="$selected"
+        local compact_padding compact_display="$selected" compact_completion=""
         printf -v compact_padding '%*s' "$compact_indent" ""
-        (( ${#compact_display} > compact_width - 4 )) && \
-          compact_display="${compact_display[1,$(( compact_width - 5 ))]}${ellipsis}"
+        if (( ${#compact_display} > compact_width - 4 )); then
+          if (( ! _ASTER_FUZZY_ACTIVE )) && [[ "$compact_display" == "$input"* ]]; then
+            compact_completion="${compact_display[${#input}+1,-1]}"
+          fi
+          if [[ -n "$compact_completion" ]] &&
+             (( ${#compact_completion} <= compact_width - 6 )); then
+            compact_display="${ellipsis} ${compact_completion}"
+          else
+            local compact_tail_width=$(( compact_width - 4 - ${#ellipsis} ))
+            local compact_tail_start=$(( ${#compact_display} - compact_tail_width + 1 ))
+            compact_display="${ellipsis}${compact_display[$compact_tail_start,-1]}"
+          fi
+        fi
         kind="$_ASTER_MENU_KINDS[$_ASTER_MENU_INDEX]"
         case "$kind" in
           history) icon="$history_icon" ;;
@@ -1113,8 +1124,19 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
 
     for (( index = _ASTER_MENU_START; index <= end; index++ )); do
       display="$_ASTER_MENU_DISPLAYS[$index]"
+      local display_truncated=0 completion_tail=""
       if (( ${#display} > title_width )); then
-        display="${display[1,$(( title_width - 1 ))]}${ellipsis}"
+        display_truncated=1
+        if (( ! _ASTER_FUZZY_ACTIVE )) && [[ "$display" == "$input"* ]]; then
+          completion_tail="${display[${#input}+1,-1]}"
+        fi
+        if [[ -n "$completion_tail" ]] && (( ${#completion_tail} <= title_width - 2 )); then
+          display="${ellipsis} ${completion_tail}"
+        else
+          local tail_width=$(( title_width - ${#ellipsis} ))
+          local tail_start=$(( ${#display} - tail_width + 1 ))
+          display="${ellipsis}${display[$tail_start,-1]}"
+        fi
       fi
       description="$_ASTER_MENU_DESCRIPTIONS[$index]"
       if (( ${#description} > description_width )); then
@@ -1150,7 +1172,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       region_highlight+=("$(( line_start + ${#row} - 1 )) $(( line_start + ${#row} )) fg=__ASTER_UI_BORDER__ memo=aster")
 
       local match_length=0
-      (( ! _ASTER_FUZZY_ACTIVE )) && match_length=${#input}
+      (( ! _ASTER_FUZZY_ACTIVE && ! display_truncated )) && match_length=${#input}
       (( match_length > title_width )) && match_length=$title_width
       if (( match_length > 0 )); then
         if (( index == _ASTER_MENU_INDEX )); then

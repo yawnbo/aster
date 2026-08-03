@@ -118,7 +118,10 @@ pasted text and syntax-highlighting plugins retain command-token colors.
 The menu is anchored from a configurable prompt offset plus the live ZLE cursor
 and clamped before the terminal's final column. It renders a bounded
 viewport with scrolloff, a position counter, semantic icons, descriptions, and
-key hints; the candidate order always remains the daemon's ranking order.
+key hints; the candidate order always remains the daemon's ranking order. Rows
+that exceed the title width are left-truncated: when the completion remainder
+fits, the row is rendered as `… remainder`, otherwise its distinguishing tail is
+preserved.
 
 Character-editing widgets only update a request snapshot and dirty flag. A
 prompt-lifetime ZLE ticker debounces those changes and launches completion in a

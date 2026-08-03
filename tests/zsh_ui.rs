@@ -97,6 +97,10 @@ _aster_test_ssh() {{
   compadd alice@example.com
 }}
 compdef _aster_test_ssh ssh
+_aster_test_long() {{
+  compadd visible-first-option visible-second-option
+}}
+compdef _aster_test_long aster-command-with-a-very-long-name
 alias ls=eza
 eval "$({aster} init zsh)"
 _aster_test_dump_state() {{
@@ -320,6 +324,33 @@ PROMPT='%# '
     let history_down_fields: Vec<_> = history_down_state.trim_end().split('|').collect();
     assert_eq!(history_down_fields[0], "0");
     assert_eq!(history_down_fields[3], "history-arrow-down");
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
+        .status()
+        .unwrap();
+    wait_for_zle(&server, &sync_file);
+
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0"])
+        .arg("aster-command-with-a-very-long-name v")
+        .status()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut long_candidate_capture = String::new();
+    while Instant::now() < deadline {
+        long_candidate_capture = capture_pane(&server, false);
+        if long_candidate_capture.contains("… isible-first-option")
+            && long_candidate_capture.contains("… isible-second-option")
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        long_candidate_capture.contains("… isible-first-option")
+            && long_candidate_capture.contains("… isible-second-option"),
+        "long completion rows did not preserve their distinguishing suffixes:\n{long_candidate_capture}"
+    );
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
