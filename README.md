@@ -93,9 +93,9 @@ The integration:
 Aster owns ZLE's suggestion display. Do not load a second autosuggestion plugin
 alongside it; competing `POSTDISPLAY` highlights can recolor or stale the menu.
 
-Native Zsh capture is asynchronous and best-effort. At argument positions,
-explicit filesystem matches precede history and remain stable while native
-results arrive; elsewhere history remains first. Duplicate displays are removed.
+Native Zsh capture is asynchronous and best-effort. History remains first at
+every position; explicit filesystem matches follow it and remain stable while
+native results arrive. Duplicate displays are removed.
 At every argument position Aster offers bounded
 local filesystem matches, so path completion does not depend on a
 command-specific completion function. Root-command flags parsed from man pages

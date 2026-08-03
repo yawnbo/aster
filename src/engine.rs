@@ -307,20 +307,21 @@ pub fn merge_filesystem_candidates(
     let trailing = original.split_off(history_count);
     let history = original;
     let mut seen = HashSet::new();
-    for path in paths {
-        if response.candidates.len() >= path_slots {
-            break;
-        }
-        if seen.insert(path.display.clone()) {
-            response.candidates.push(path);
-        }
-    }
     for candidate in history.into_iter().take(history_keep) {
         if response.candidates.len() >= limit {
             break;
         }
         if seen.insert(candidate.display.clone()) {
             response.candidates.push(candidate);
+        }
+    }
+    let path_limit = response.candidates.len().saturating_add(path_slots);
+    for path in paths {
+        if response.candidates.len() >= path_limit || response.candidates.len() >= limit {
+            break;
+        }
+        if seen.insert(path.display.clone()) {
+            response.candidates.push(path);
         }
     }
     for candidate in trailing {
@@ -695,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_candidates_reserve_capacity_after_history() {
+    fn history_stays_first_while_filesystem_candidates_reserve_capacity() {
         let mut response = CompletionResponse {
             replace_start_byte: 5,
             replace_end_byte: 5,
@@ -725,7 +726,7 @@ mod tests {
             .collect();
         merge_filesystem_candidates(&mut response, paths, 4);
         assert_eq!(response.candidates.len(), 4);
-        assert_eq!(response.candidates[0].source, CandidateSource::Filesystem);
+        assert_eq!(response.candidates[0].source, CandidateSource::History);
         assert_eq!(
             response
                 .candidates

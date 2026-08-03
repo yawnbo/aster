@@ -169,9 +169,9 @@ finish.
 The frontend accepts only literal append operations at end-of-line. Matches
 that need quoting, hidden prefixes, ignored prefixes, in-word replacement, or
 other native edit semantics are discarded, while Tab with no open Aster menu
-remains delegated to Zsh for exact behavior. Frontend merging keeps explicit
-filesystem matches first at argument positions, then history, parsed options,
-native matches, and command inventory. It deduplicates by full display text and
+remains delegated to Zsh for exact behavior. Frontend merging keeps history first
+at every position, then filesystem matches, parsed options, native matches, and
+command inventory. It deduplicates by full display text and
 preserves the current numeric row across asynchronous updates, so newly inserted
 providers cannot move row 1 to a seemingly random position.
 

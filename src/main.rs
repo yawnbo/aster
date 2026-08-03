@@ -1503,7 +1503,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     _ASTER_MENU_SOURCES=()
 
     for (( index = 1; index <= ${#_ASTER_DAEMON_ACCEPTS}; index++ )); do
-      [[ "${_ASTER_DAEMON_SOURCES[$index]}" == filesystem ]] || continue
+      [[ "${_ASTER_DAEMON_SOURCES[$index]}" == history ]] || continue
       display="${_ASTER_DAEMON_DISPLAYS[$index]}"
       [[ -n "$display" ]] && (( ! ${_ASTER_MENU_DISPLAYS[(Ie)$display]} )) || continue
       _ASTER_MENU_ACCEPTS+=("${_ASTER_DAEMON_ACCEPTS[$index]}")
@@ -1516,7 +1516,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
 
     if (( ${#_ASTER_MENU_ACCEPTS} < limit )); then
       for (( index = 1; index <= ${#_ASTER_DAEMON_ACCEPTS}; index++ )); do
-        [[ "${_ASTER_DAEMON_SOURCES[$index]}" == history ]] || continue
+        [[ "${_ASTER_DAEMON_SOURCES[$index]}" == filesystem ]] || continue
         display="${_ASTER_DAEMON_DISPLAYS[$index]}"
         [[ -n "$display" ]] && (( ! ${_ASTER_MENU_DISPLAYS[(Ie)$display]} )) || continue
         _ASTER_MENU_ACCEPTS+=("${_ASTER_DAEMON_ACCEPTS[$index]}")

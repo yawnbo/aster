@@ -330,6 +330,44 @@ PROMPT='%# '
         .unwrap();
     wait_for_zle(&server, &sync_file);
 
+    let status = Command::new(aster)
+        .args([
+            "record",
+            "--command",
+            "cargo release patch --execute",
+            "--cwd",
+            temporary.path().to_str().unwrap(),
+            "--exit-code",
+            "0",
+            "--session",
+            "history-priority-test",
+        ])
+        .env("ASTER_CONFIG", &config)
+        .env("ASTER_STATE_DIR", &state)
+        .env("ASTER_SOCKET", &socket)
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to seed priority history");
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0"])
+        .arg("cargo release patch ")
+        .status()
+        .unwrap();
+    wait_for_pane(&server, "cargo release patch --execute");
+    dump_zle_state(&server);
+    let history_priority_state = fs::read_to_string(&state_dump).unwrap();
+    let history_priority_fields: Vec<_> = history_priority_state.trim_end().split('|').collect();
+    assert_eq!(history_priority_fields[6], "cargo release patch --execute");
+    assert!(
+        history_priority_fields[14].contains("cargo release patch Cargo.toml"),
+        "filesystem fixture did not compete with history: {history_priority_state:?}"
+    );
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
+        .status()
+        .unwrap();
+    wait_for_zle(&server, &sync_file);
+
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0"])
         .arg("aster-command-with-a-very-long-name v")
