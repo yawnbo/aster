@@ -258,17 +258,22 @@ pub fn filesystem_candidates(
         if is_directory {
             insert_text.push('/');
         }
-        if insert_text.is_empty() {
-            continue;
+        let exact_file = !is_directory && insert_text.is_empty();
+        if exact_file {
+            insert_text.push(' ');
         }
-        matches.push((is_directory, name, insert_text));
+        matches.push((is_directory, name, insert_text, exact_file));
     }
     matches.sort_unstable_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
     Ok(matches
         .into_iter()
         .take(limit)
-        .map(|(is_directory, _, insert_text)| Candidate {
-            display: format!("{buffer}{insert_text}"),
+        .map(|(is_directory, _, insert_text, exact_file)| Candidate {
+            display: if exact_file {
+                buffer.to_owned()
+            } else {
+                format!("{buffer}{insert_text}")
+            },
             description: if is_directory { "Directory" } else { "File" }.to_owned(),
             description_pending: false,
             kind: if is_directory {
@@ -657,6 +662,14 @@ mod tests {
             filesystem_candidates(nested, nested.len(), directory.path().to_str().unwrap(), 10)
                 .unwrap();
         assert_eq!(candidates[0].display, "scp -r space\\ dir/child");
+
+        let exact = "scp -r alpha-file";
+        let candidates =
+            filesystem_candidates(exact, exact.len(), directory.path().to_str().unwrap(), 10)
+                .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].display, exact);
+        assert_eq!(candidates[0].accept_text, " ");
 
         let blank = "scp -r ";
         let candidates =

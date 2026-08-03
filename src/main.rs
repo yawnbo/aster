@@ -712,6 +712,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   typeset -g _ASTER_NATIVE_INFLIGHT_BUFFER=""
   typeset -g _ASTER_NATIVE_INFLIGHT_CURSOR=0
   typeset -g _ASTER_IN_NATIVE_COMPLETION=0
+  typeset -g _ASTER_IN_BRACKETED_PASTE=0
   typeset -g _ASTER_FUZZY_ACTIVE=0
   typeset -g _ASTER_FUZZY_BASE=""
   typeset -g _ASTER_FUZZY_QUERY=""
@@ -1406,15 +1407,40 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   }
 
   _aster_path_accept() {
-    local index found=0
+    local index found=0 common="" candidate
     for (( index = 1; index <= ${#_ASTER_MENU_ACCEPTS}; index++ )); do
       [[ "${_ASTER_MENU_KINDS[$index]}" == file ||
          "${_ASTER_MENU_KINDS[$index]}" == directory ]] || continue
       (( found++ ))
+      candidate="${_ASTER_MENU_ACCEPTS[$index]}"
+      if [[ -z "$common" ]]; then
+        common="$candidate"
+      else
+        while [[ -n "$common" && "$candidate" != "$common"* ]]; do
+          common="${common[1,-2]}"
+        done
+      fi
     done
+    if [[ "${_ASTER_MENU_KINDS[$_ASTER_MENU_INDEX]}" == file &&
+          "${_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}" == "$BUFFER" ]]; then
+      _aster_menu_accept segment
+      return
+    fi
     if (( found == 1 )) && [[ "${_ASTER_MENU_DESCRIPTIONS[$_ASTER_MENU_INDEX]}" != *"(more matches)" ]]; then
       _aster_menu_accept segment
       return
+    fi
+    if [[ -n "$common" && "${(j: :)_ASTER_MENU_DESCRIPTIONS}" != *"(more matches)"* ]]; then
+      _aster_next_segment "$common"
+      if [[ -n "$REPLY" ]]; then
+        LBUFFER+="$REPLY"
+        POSTDISPLAY=""
+        _ASTER_MENU_INDEX=1
+        _ASTER_MENU_START=1
+        _ASTER_MENU_RESTORE_INDEX=1
+        _aster_menu_refresh
+        return
+      fi
     fi
     zle beep
   }
@@ -1442,7 +1468,14 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
           [[ "$accept" == "$delta"* ]] || continue
           accept="${accept[${#delta}+1,-1]}"
         fi
-        [[ -n "$accept" ]] || continue
+        if [[ -z "$accept" ]]; then
+          if [[ "${_ASTER_MENU_KINDS[$index]}" == file &&
+                "${_ASTER_MENU_DISPLAYS[$index]}" == "$BUFFER" ]]; then
+            accept=" "
+          else
+            continue
+          fi
+        fi
         accepts+=("$accept")
         displays+=("${_ASTER_MENU_DISPLAYS[$index]}")
         descriptions+=("${_ASTER_MENU_DESCRIPTIONS[$index]}")
@@ -1939,6 +1972,10 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   }
 
   _aster_self_insert() {
+    if (( _ASTER_IN_BRACKETED_PASTE )); then
+      zle _aster-native-self-insert
+      return
+    fi
     if (( _ASTER_FUZZY_ACTIVE )); then
       _ASTER_FUZZY_QUERY+="$KEYS"
       _aster_fuzzy_refresh
@@ -1981,7 +2018,12 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   _aster_bracketed_paste() {
     _aster_menu_clear 1
     POSTDISPLAY=""
-    zle _aster-native-bracketed-paste
+    _ASTER_IN_BRACKETED_PASTE=1
+    {
+      zle _aster-native-bracketed-paste
+    } always {
+      _ASTER_IN_BRACKETED_PASTE=0
+    }
     _aster_menu_refresh
   }
 

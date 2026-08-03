@@ -102,8 +102,9 @@ command-specific completion function. Root-command flags parsed from man pages
 or sandboxed `--help` output appear lazily with their descriptions ahead of
 duplicate native matches. Quoted
 replacements, mid-word edits, and other non-append-safe completion behavior
-remain under ordinary Zsh Tab. For ambiguous filesystem matches, Tab leaves the
-buffer unchanged and never selects the first entry arbitrarily.
+remain under ordinary Zsh Tab. For ambiguous filesystem matches, Tab accepts
+only their shared prefix and never selects the first entry arbitrarily. An exact
+file remains selectable with a following Tab, which appends a space.
 
 The same setup works inside tmux and on SSH hosts. Each remote host runs its own
 daemon and keeps its own local history; tmux panes on that host share it.

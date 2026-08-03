@@ -36,6 +36,12 @@ fn popup_preserves_highlights_and_shell_bindings() {
     fs::write(&preview_file_two, "preview-other-candidate\n").unwrap();
     fs::write(temporary.path().join("filesystem-alpha"), "alpha").unwrap();
     fs::write(temporary.path().join("filesystem-beta"), "beta").unwrap();
+    fs::write(
+        temporary.path().join("kitty.conf"),
+        "font_family monospace\n",
+    )
+    .unwrap();
+    fs::write(temporary.path().join("kitty.conf.bak"), "backup\n").unwrap();
     let fake_eza = helper_bin.join("eza");
     fs::write(
         &fake_eza,
@@ -53,6 +59,8 @@ fn popup_preserves_highlights_and_shell_bindings() {
         r#"export PATH={helper_bin}:$PATH
 autoload -Uz add-zle-hook-widget compinit
 compinit -u
+autoload -Uz bracketed-paste-magic
+zle -N bracketed-paste bracketed-paste-magic
 _aster_test_history_up() {{
   BUFFER=history-arrow-up
   CURSOR=${{#BUFFER}}
@@ -716,6 +724,35 @@ PROMPT='%# '
         )),
         "Tab did not accept the unique filesystem candidate: {scp_unique_path:?}"
     );
+
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
+        .status()
+        .unwrap();
+    wait_for_zle(&server, &sync_file);
+    let kitty_prefix = format!("nv {}/kitty.con", temporary.path().display());
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0"])
+        .arg(&kitty_prefix)
+        .status()
+        .unwrap();
+    wait_for_pane(&server, "f.bak");
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "Tab"])
+        .status()
+        .unwrap();
+    dump_zle_state(&server);
+    let common_path_state = fs::read_to_string(&state_dump).unwrap();
+    let common_path_fields: Vec<_> = common_path_state.trim_end().split('|').collect();
+    assert_eq!(common_path_fields[3], format!("{kitty_prefix}f"));
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "Tab"])
+        .status()
+        .unwrap();
+    dump_zle_state(&server);
+    let exact_path_state = fs::read_to_string(&state_dump).unwrap();
+    let exact_path_fields: Vec<_> = exact_path_state.trim_end().split('|').collect();
+    assert_eq!(exact_path_fields[3], format!("{kitty_prefix}f "));
 
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])

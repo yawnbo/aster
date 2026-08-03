@@ -84,9 +84,10 @@ its configured amount and immediately queries again. Tab accepts the shortest
 next semantic segment while the menu is open. Boundaries include words, paths,
 assignments, lists, URLs, and remote destinations such as `user@host:/path`;
 quoted, escaped, and bracketed IPv6 separators remain intact. When multiple
-filesystem candidates are present, Tab leaves the buffer unchanged rather than
-computing a prefix from a potentially truncated menu or selecting an arbitrary
-first entry.
+filesystem candidates are present, Tab accepts their common insertion prefix if
+one exists and otherwise leaves the buffer unchanged instead of selecting an
+arbitrary first entry. Exact files remain as explicit candidates whose next Tab
+adds the trailing space.
 After any accepted segment, the refreshed menu starts at row 1 rather than
 carrying its previous index forward. Selection does not change the
 editing keymap, so character insertion and Backspace keep their ordinary
