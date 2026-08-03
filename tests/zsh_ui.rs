@@ -52,7 +52,7 @@ fn popup_preserves_highlights_and_shell_bindings() {
     let zshrc = format!(
         r#"export PATH={helper_bin}:$PATH
 autoload -Uz add-zle-hook-widget compinit
-compinit -i
+compinit -u
 _aster_test_highlight() {{
   region_highlight=( "${{(@)region_highlight:#*memo=foreign-test*}}" )
   [[ -n "$BUFFER" ]] && region_highlight+=("0 ${{#BUFFER}} fg=green memo=foreign-test")
@@ -1015,7 +1015,7 @@ PROMPT='%# '
         status.success(),
         "failed to start the non-UTF-8 Zsh fixture"
     );
-    thread::sleep(Duration::from_millis(300));
+    wait_for_zle_target(&server, "test:ascii.0", &sync_file);
     Command::new("tmux")
         .args([
             "-L",
@@ -1104,11 +1104,15 @@ fn dump_zle_state(server: &str) {
 }
 
 fn wait_for_zle(server: &str, sync_file: &Path) {
+    wait_for_zle_target(server, "test:0.0", sync_file);
+}
+
+fn wait_for_zle_target(server: &str, target: &str, sync_file: &Path) {
     let _ = fs::remove_file(sync_file);
     let deadline = Instant::now() + Duration::from_secs(4);
     while Instant::now() < deadline {
         Command::new("tmux")
-            .args(["-L", server, "send-keys", "-t", "test:0.0", "C-g"])
+            .args(["-L", server, "send-keys", "-t", target, "C-g"])
             .status()
             .unwrap();
         thread::sleep(Duration::from_millis(50));
@@ -1117,8 +1121,8 @@ fn wait_for_zle(server: &str, sync_file: &Path) {
         }
     }
     panic!(
-        "ZLE did not become ready after interrupt:\n{}",
-        capture_pane(server, false)
+        "ZLE did not become ready in {target}:\n{}",
+        capture_target(server, target, false)
     );
 }
 
