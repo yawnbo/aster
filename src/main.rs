@@ -957,6 +957,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   }
 
   _aster_fuzzy_refresh() {
+    BUFFER="${_ASTER_FUZZY_BASE}${_ASTER_FUZZY_QUERY}"
+    CURSOR=${#BUFFER}
     _ASTER_MENU_BUFFER="$BUFFER"
     _aster_menu_schedule
     _aster_menu_render
@@ -967,6 +969,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     local horizontal="─" vertical="│" top_left="╭" top_right="╮"
     local bottom_left="╰" bottom_right="╯" separator="·" ellipsis="…"
     local selected_marker="▶ " history_icon="↺" command_icon="❯" native_icon="⇥"
+    local fuzzy_ghost_prefix="  → "
     local file_icon="·" directory_icon="▸" option_icon="-"
     if (( ! _ASTER_UTF8_UI )); then
       horizontal="-"
@@ -984,26 +987,30 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       file_icon="F"
       directory_icon="D"
       option_icon="O"
+      fuzzy_ghost_prefix="  -> "
     fi
     local input="${BUFFER:-$_ASTER_MENU_REQUEST_BUFFER}"
-    local virtual_query=""
-    (( _ASTER_FUZZY_ACTIVE )) && virtual_query="$_ASTER_FUZZY_QUERY"
     local cursor_position=$CURSOR
     if [[ -z "$BUFFER" && -n "$_ASTER_MENU_REQUEST_BUFFER" ]]; then
       cursor_position=$_ASTER_MENU_REQUEST_CURSOR
     fi
     local total=${#_ASTER_MENU_DISPLAYS}
     local selected="$_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]"
-    if (( ! _ASTER_FUZZY_ACTIVE && cursor_position == ${#input} )) &&
-       [[ -n "$input" && "$selected" == "$input"* ]]; then
-      ghost="${selected[${#input}+1,-1]}"
+    if (( cursor_position == ${#input} )); then
+      if (( _ASTER_FUZZY_ACTIVE )); then
+        [[ -n "$selected" ]] && ghost="${fuzzy_ghost_prefix}${selected}"
+      elif [[ -n "$input" && "$selected" == "$input"* ]]; then
+        ghost="${selected[${#input}+1,-1]}"
+      fi
     fi
     region_highlight=( "${(@)region_highlight:#*memo=aster*}" )
-    (( _ASTER_FUZZY_ACTIVE )) && POSTDISPLAY="$virtual_query" || POSTDISPLAY="$ghost"
+    POSTDISPLAY="$ghost"
     local buffer_end=${#input}
-    if [[ -n "$virtual_query" ]]; then
-      region_highlight+=("$buffer_end $(( buffer_end + ${#virtual_query} )) fg=__ASTER_UI_ACCENT__,bold memo=aster")
-    elif [[ -n "$ghost" ]]; then
+    if (( _ASTER_FUZZY_ACTIVE && ${#_ASTER_FUZZY_QUERY} )); then
+      local query_start=${#_ASTER_FUZZY_BASE}
+      region_highlight+=("$query_start $buffer_end fg=__ASTER_UI_ACCENT__,bold memo=aster")
+    fi
+    if [[ -n "$ghost" ]]; then
       region_highlight+=("$buffer_end $(( buffer_end + ${#ghost} )) fg=__ASTER_UI_GHOST__ memo=aster")
     fi
     local box_width=$(( ${COLUMNS:-80} - 2 ))
@@ -1042,9 +1049,10 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
 
     if (( total == 0 )); then
       region_highlight=( "${(@)region_highlight:#*memo=aster*}" )
-      POSTDISPLAY="$virtual_query"
-      if [[ -n "$virtual_query" ]]; then
-        region_highlight+=("${#input} $(( ${#input} + ${#virtual_query} )) fg=__ASTER_UI_ACCENT__,bold memo=aster")
+      POSTDISPLAY=""
+      if (( _ASTER_FUZZY_ACTIVE && ${#_ASTER_FUZZY_QUERY} )); then
+        local query_start=${#_ASTER_FUZZY_BASE}
+        region_highlight+=("$query_start ${#input} fg=__ASTER_UI_ACCENT__,bold memo=aster")
       fi
       _ASTER_MENU_OWNS_DISPLAY=1
       return 0

@@ -51,7 +51,7 @@ fn popup_preserves_highlights_and_shell_bindings() {
     let zshrc = format!(
         r#"export PATH={helper_bin}:$PATH
 autoload -Uz add-zle-hook-widget compinit
-compinit
+compinit -i
 _aster_test_highlight() {{
   region_highlight=( "${{(@)region_highlight:#*memo=foreign-test*}}" )
   [[ -n "$BUFFER" ]] && region_highlight+=("0 ${{#BUFFER}} fg=green memo=foreign-test")
@@ -85,7 +85,7 @@ compdef _aster_test_ssh ssh
 alias ls=eza
 eval "$({aster} init zsh)"
 _aster_test_dump_state() {{
-  print -r -- "$_ASTER_MENU_ACTIVE|${{#_ASTER_MENU_ACCEPTS}}|$_ASTER_MENU_BUFFER|$BUFFER|${{_ASTER_MENU_ACCEPTS[1]}}|$_ASTER_MENU_INDEX|${{_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}}|$_ASTER_FUZZY_ACTIVE|$_ASTER_FUZZY_BASE|$_ASTER_FUZZY_QUERY|$_ASTER_PREVIEW_FD|$_ASTER_PREVIEW_TICKS|$_ASTER_PREVIEW_PATH|${{(j:;:)_ASTER_PREVIEW_LINES}}|${{(j:;:)_ASTER_MENU_DISPLAYS}}" > {state_dump}
+  print -r -- "$_ASTER_MENU_ACTIVE|${{#_ASTER_MENU_ACCEPTS}}|$_ASTER_MENU_BUFFER|$BUFFER|${{_ASTER_MENU_ACCEPTS[1]}}|$_ASTER_MENU_INDEX|${{_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}}|$_ASTER_FUZZY_ACTIVE|$_ASTER_FUZZY_BASE|$_ASTER_FUZZY_QUERY|$_ASTER_PREVIEW_FD|$_ASTER_PREVIEW_TICKS|$_ASTER_PREVIEW_PATH|${{(j:;:)_ASTER_PREVIEW_LINES}}|${{(j:;:)_ASTER_MENU_DISPLAYS}}|${{POSTDISPLAY%%$'\n'*}}" > {state_dump}
 }}
 zle -N _aster_test_dump_state
 bindkey '^X^D' _aster_test_dump_state
@@ -360,6 +360,11 @@ PROMPT='%# '
     assert!(
         shifted_state.contains("|2|aster-native-fixture native/second/file"),
         "Shift-Tab did not select the next candidate: {shifted_state:?}"
+    );
+    let shifted_fields: Vec<_> = shifted_state.trim_end().split('|').collect();
+    assert_eq!(
+        shifted_fields[15], "ive/second/file",
+        "selected candidate was not reflected in ghost text"
     );
 
     Command::new("tmux")
@@ -650,24 +655,29 @@ PROMPT='%# '
         "Aster did not restart its ticker after .zshrc was sourced:\n{reloaded_capture}"
     );
 
-    let status = Command::new(aster)
-        .args([
-            "record",
-            "--command",
-            "echo fuzzy-history-target",
-            "--cwd",
-            temporary.path().to_str().unwrap(),
-            "--exit-code",
-            "0",
-            "--session",
-            "fuzzy-test",
-        ])
-        .env("ASTER_CONFIG", &config)
-        .env("ASTER_STATE_DIR", &state)
-        .env("ASTER_SOCKET", &socket)
-        .status()
-        .unwrap();
-    assert!(status.success(), "failed to seed fuzzy history");
+    for command in [
+        "echo fuzzy-history-target",
+        "echo fuzzy-history-target-secondary",
+    ] {
+        let status = Command::new(aster)
+            .args([
+                "record",
+                "--command",
+                command,
+                "--cwd",
+                temporary.path().to_str().unwrap(),
+                "--exit-code",
+                "0",
+                "--session",
+                "fuzzy-test",
+            ])
+            .env("ASTER_CONFIG", &config)
+            .env("ASTER_STATE_DIR", &state)
+            .env("ASTER_SOCKET", &socket)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to seed fuzzy history");
+    }
     let ls_history = format!("ls {}", temporary.path().display());
     let status = Command::new(aster)
         .args([
@@ -711,10 +721,37 @@ PROMPT='%# '
     dump_zle_state(&server);
     let fuzzy_state = fs::read_to_string(&state_dump).unwrap();
     let fuzzy_fields: Vec<_> = fuzzy_state.trim_end().split('|').collect();
-    assert_eq!(fuzzy_fields[3], " ");
+    assert_eq!(fuzzy_fields[3], " fzht");
     assert_eq!(fuzzy_fields[7], "1");
     assert_eq!(fuzzy_fields[8], " ");
     assert_eq!(fuzzy_fields[9], "fzht");
+    assert_eq!(
+        fuzzy_fields[15],
+        format!("  → {}", fuzzy_fields[6]),
+        "selected fuzzy candidate was not reflected in ghost text"
+    );
+    assert_eq!(
+        cursor_x(&server, "test:0.0"),
+        7,
+        "fuzzy query did not retain ZLE's real cursor"
+    );
+    assert!(
+        fuzzy_fields[1].parse::<usize>().unwrap() >= 2,
+        "fuzzy fixture did not produce scrollable candidates: {fuzzy_state:?}"
+    );
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-n"])
+        .status()
+        .unwrap();
+    dump_zle_state(&server);
+    let scrolled_fuzzy_state = fs::read_to_string(&state_dump).unwrap();
+    let scrolled_fuzzy_fields: Vec<_> = scrolled_fuzzy_state.trim_end().split('|').collect();
+    assert_ne!(scrolled_fuzzy_fields[6], fuzzy_fields[6]);
+    assert_eq!(
+        scrolled_fuzzy_fields[15],
+        format!("  → {}", scrolled_fuzzy_fields[6]),
+        "scrolling did not update fuzzy ghost text"
+    );
 
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "Escape"])
@@ -746,7 +783,7 @@ PROMPT='%# '
     dump_zle_state(&server);
     let accepted_fuzzy_state = fs::read_to_string(&state_dump).unwrap();
     let accepted_fields: Vec<_> = accepted_fuzzy_state.trim_end().split('|').collect();
-    assert_eq!(accepted_fields[3], "echo fuzzy-history-target");
+    assert!(accepted_fields[3].starts_with("echo fuzzy-history-target"));
     assert_eq!(accepted_fields[7], "0");
 
     Command::new("tmux")

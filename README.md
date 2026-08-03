@@ -79,8 +79,9 @@ The integration:
   short deadline.
 - Uses Ctrl-Space to accept the entire highlighted candidate and preserves its
   previous binding as the fallback when Aster has no candidate.
-- Uses Ctrl-N and Ctrl-K to move through an open menu; outside the menu their
-  prior widgets remain active.
+- Uses Ctrl-N and Ctrl-K to move through an open menu and updates inline ghost
+  text to preview the selected row; outside the menu their prior widgets remain
+  active.
 - Accepts the full suggestion with Ctrl-Space, or the shortest next segment with
   Tab; Enter remains the shell's untouched command-submission binding.
 - Leaves tmux pane titles and automatic window naming entirely under tmux and
