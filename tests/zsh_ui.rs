@@ -29,6 +29,7 @@ fn popup_preserves_highlights_and_shell_bindings() {
     let config = temporary.path().join("aster.toml");
     let socket = state.join("aster.sock");
     let state_dump = temporary.path().join("zle-state");
+    let sync_file = temporary.path().join("zle-sync");
     let preview_file = temporary.path().join("preview-target.txt");
     let preview_file_two = temporary.path().join("preview-target.zzz.txt");
     fs::write(&preview_file, "preview-first-line\npreview-second-line\n").unwrap();
@@ -87,16 +88,23 @@ eval "$({aster} init zsh)"
 _aster_test_dump_state() {{
   print -r -- "$_ASTER_MENU_ACTIVE|${{#_ASTER_MENU_ACCEPTS}}|$_ASTER_MENU_BUFFER|$BUFFER|${{_ASTER_MENU_ACCEPTS[1]}}|$_ASTER_MENU_INDEX|${{_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}}|$_ASTER_FUZZY_ACTIVE|$_ASTER_FUZZY_BASE|$_ASTER_FUZZY_QUERY|$_ASTER_PREVIEW_FD|$_ASTER_PREVIEW_TICKS|$_ASTER_PREVIEW_PATH|${{(j:;:)_ASTER_PREVIEW_LINES}}|${{(j:;:)_ASTER_MENU_DISPLAYS}}|${{POSTDISPLAY%%$'\n'*}}" > {state_dump}
 }}
+_aster_test_sync() {{
+  : > {sync_file}
+}}
 zle -N _aster_test_dump_state
+zle -N _aster_test_sync
 bindkey '^X^D' _aster_test_dump_state
+bindkey '^G' _aster_test_sync
 bindkey -M aster-fuzzy '^X^D' _aster_test_dump_state
+bindkey -M aster-fuzzy '^G' _aster_test_sync
 PROMPT='%# '
 "#,
         aster = shell_quote(aster.to_str().unwrap()),
         helper_bin = shell_quote(helper_bin.to_str().unwrap()),
         preview_file = shell_quote(preview_file.to_str().unwrap()),
         preview_file_two = shell_quote(preview_file_two.to_str().unwrap()),
-        state_dump = shell_quote(state_dump.to_str().unwrap())
+        state_dump = shell_quote(state_dump.to_str().unwrap()),
+        sync_file = shell_quote(sync_file.to_str().unwrap())
     );
     fs::write(zdotdir.join(".zshrc"), zshrc).unwrap();
     let shell_environment = format!(
@@ -233,7 +241,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
-    thread::sleep(Duration::from_millis(200));
+    wait_for_zle(&server, &sync_file);
     let binding_command = format!(
         "{{ bindkey '^M'; bindkey '^I'; bindkey '^[[Z'; }} > {}",
         shell_quote(binding_file.to_str().unwrap())
@@ -283,7 +291,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
-    thread::sleep(Duration::from_millis(50));
+    wait_for_zle(&server, &sync_file);
 
     Command::new("tmux")
         .args([
@@ -311,7 +319,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
-    thread::sleep(Duration::from_millis(200));
+    wait_for_zle(&server, &sync_file);
 
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0"])
@@ -455,7 +463,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
-    thread::sleep(Duration::from_millis(300));
+    wait_for_zle(&server, &sync_file);
     Command::new("tmux")
         .args([
             "-L",
@@ -484,7 +492,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
-    thread::sleep(Duration::from_millis(300));
+    wait_for_zle(&server, &sync_file);
     Command::new("tmux")
         .args([
             "-L",
@@ -519,7 +527,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
-    thread::sleep(Duration::from_millis(300));
+    wait_for_zle(&server, &sync_file);
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0"])
         .arg("aster-native-fixture na")
@@ -540,6 +548,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
+    wait_for_zle(&server, &sync_file);
     let scp_path_prefix = format!("scp -r {}/filesystem-", temporary.path().display());
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0"])
@@ -600,6 +609,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
+    wait_for_zle(&server, &sync_file);
     let source_command = format!(
         "zle -D _aster-native-space; source {}",
         shell_quote(zdotdir.join(".zshrc").to_str().unwrap())
@@ -701,6 +711,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
+    wait_for_zle(&server, &sync_file);
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0", "  fzht"])
         .status()
@@ -790,7 +801,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
-    thread::sleep(Duration::from_millis(300));
+    wait_for_zle(&server, &sync_file);
 
     Command::new("tmux")
         .args([
@@ -814,7 +825,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
-    thread::sleep(Duration::from_millis(300));
+    wait_for_zle(&server, &sync_file);
 
     Command::new("tmux")
         .args([
@@ -849,6 +860,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
+    wait_for_zle(&server, &sync_file);
     Command::new("tmux")
         .args([
             "-L",
@@ -894,7 +906,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
-    thread::sleep(Duration::from_millis(50));
+    wait_for_zle(&server, &sync_file);
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0", "ls "])
         .status()
@@ -923,7 +935,7 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
-    thread::sleep(Duration::from_millis(50));
+    wait_for_zle(&server, &sync_file);
     let preview_prefix = preview_file.to_str().unwrap().strip_suffix("txt").unwrap();
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0"])
@@ -1089,6 +1101,25 @@ fn dump_zle_state(server: &str) {
         .status()
         .unwrap();
     thread::sleep(Duration::from_millis(20));
+}
+
+fn wait_for_zle(server: &str, sync_file: &Path) {
+    let _ = fs::remove_file(sync_file);
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < deadline {
+        Command::new("tmux")
+            .args(["-L", server, "send-keys", "-t", "test:0.0", "C-g"])
+            .status()
+            .unwrap();
+        thread::sleep(Duration::from_millis(50));
+        if sync_file.exists() {
+            return;
+        }
+    }
+    panic!(
+        "ZLE did not become ready after interrupt:\n{}",
+        capture_pane(server, false)
+    );
 }
 
 fn capture_pane(server: &str, include_escape_sequences: bool) -> String {
