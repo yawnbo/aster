@@ -54,11 +54,13 @@ The integration:
 - Records submitted foreground commands and the shell status reported afterward.
 - Starts the per-host daemon automatically.
 - Uses Tab to accept the shortest next word or path segment from an open Aster
-  suggestion; with no open suggestion, it delegates to the previous Zsh widget.
+  suggestion; each accepted segment resets the refreshed menu to row 1. With no
+  open suggestion, Tab delegates to the previous Zsh widget.
 - Uses Shift-Tab to move upward through suggestions without entering a modal
   editing state; letters and Backspace continue editing normally.
 - Consumes a second consecutive Space to enter inline fuzzy mode over shared
-  history and installed commands. Escape exits and preserves the first Space.
+  history and installed commands. Escape restores only the current command's
+  base buffer; Ctrl-C and each new prompt discard all fuzzy state.
 - Captures append-safe candidates from the configured Zsh completion system in
   a forked completion context after about 30-60 ms idle and blends them into
   Aster's menu without blocking input.
@@ -68,7 +70,8 @@ The integration:
 - Adds a lazy preview box at 100 columns or wider only when useful content is
   available. History-only and generic rows stay compact; command details reuse
   the existing asynchronous description workers, and selected native text files
-  are read through a bounded, sanitized background helper.
+  are read through a bounded, sanitized background helper. Changing rows erases
+  the previous preview immediately and stale async results are target-checked.
 - Previews simple `ls`, GNU `gls`, and `eza` suggestions asynchronously,
   including `ls` aliases backed by `eza`. Aster passes a validated argv directly
   without a shell, translates `eza` colors into ZLE-safe highlight spans,
@@ -86,12 +89,17 @@ The integration:
 Aster owns ZLE's suggestion display. Do not load a second autosuggestion plugin
 alongside it; competing `POSTDISPLAY` highlights can recolor or stale the menu.
 
-Native Zsh capture is asynchronous and best-effort. History remains first,
-native matches appear before generic command inventory, and duplicate displays
-are removed. Aster only imports matches that are safe literal appends at the end
-of the buffer. Quoted replacements, mid-word edits, removable suffixes, and
-completion functions that bypass `compadd` remain available through ordinary
-Tab whenever Aster has no open suggestion.
+Native Zsh capture is asynchronous and best-effort. At argument positions,
+explicit filesystem matches precede history and remain stable while native
+results arrive; elsewhere history remains first. Duplicate displays are removed.
+At every argument position Aster offers bounded
+local filesystem matches, so path completion does not depend on a
+command-specific completion function. Root-command flags parsed from man pages
+or sandboxed `--help` output appear lazily with their descriptions ahead of
+duplicate native matches. Quoted
+replacements, mid-word edits, and other non-append-safe completion behavior
+remain under ordinary Zsh Tab. For ambiguous filesystem matches, Tab leaves the
+buffer unchanged and never selects the first entry arbitrarily.
 
 The same setup works inside tmux and on SSH hosts. Each remote host runs its own
 daemon and keeps its own local history; tmux panes on that host share it.

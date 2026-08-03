@@ -30,7 +30,11 @@ fn popup_preserves_highlights_and_shell_bindings() {
     let socket = state.join("aster.sock");
     let state_dump = temporary.path().join("zle-state");
     let preview_file = temporary.path().join("preview-target.txt");
+    let preview_file_two = temporary.path().join("preview-target.zzz.txt");
     fs::write(&preview_file, "preview-first-line\npreview-second-line\n").unwrap();
+    fs::write(&preview_file_two, "preview-other-candidate\n").unwrap();
+    fs::write(temporary.path().join("filesystem-alpha"), "alpha").unwrap();
+    fs::write(temporary.path().join("filesystem-beta"), "beta").unwrap();
     let fake_eza = helper_bin.join("eza");
     fs::write(
         &fake_eza,
@@ -63,13 +67,17 @@ _aster_test_native() {{
 }}
 compdef _aster_test_native aster-native-fixture
 _aster_test_file() {{
-  compadd {preview_file}
+  compadd {preview_file} {preview_file_two}
 }}
 compdef _aster_test_file aster-preview-fixture
+_aster_test_scp() {{
+  compadd file-alpha file-beta
+}}
+compdef _aster_test_scp scp
 alias ls=eza
 eval "$({aster} init zsh)"
 _aster_test_dump_state() {{
-  print -r -- "$_ASTER_MENU_ACTIVE|${{#_ASTER_MENU_ACCEPTS}}|$_ASTER_MENU_BUFFER|$BUFFER|${{_ASTER_MENU_ACCEPTS[1]}}|$_ASTER_MENU_INDEX|${{_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}}|$_ASTER_FUZZY_ACTIVE|$_ASTER_FUZZY_BASE|$_ASTER_FUZZY_QUERY|$_ASTER_PREVIEW_FD|$_ASTER_PREVIEW_TICKS|$_ASTER_PREVIEW_PATH|${{(j:;:)_ASTER_PREVIEW_LINES}}" > {state_dump}
+  print -r -- "$_ASTER_MENU_ACTIVE|${{#_ASTER_MENU_ACCEPTS}}|$_ASTER_MENU_BUFFER|$BUFFER|${{_ASTER_MENU_ACCEPTS[1]}}|$_ASTER_MENU_INDEX|${{_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}}|$_ASTER_FUZZY_ACTIVE|$_ASTER_FUZZY_BASE|$_ASTER_FUZZY_QUERY|$_ASTER_PREVIEW_FD|$_ASTER_PREVIEW_TICKS|$_ASTER_PREVIEW_PATH|${{(j:;:)_ASTER_PREVIEW_LINES}}|${{(j:;:)_ASTER_MENU_DISPLAYS}}" > {state_dump}
 }}
 zle -N _aster_test_dump_state
 bindkey '^X^D' _aster_test_dump_state
@@ -79,6 +87,7 @@ PROMPT='%# '
         aster = shell_quote(aster.to_str().unwrap()),
         helper_bin = shell_quote(helper_bin.to_str().unwrap()),
         preview_file = shell_quote(preview_file.to_str().unwrap()),
+        preview_file_two = shell_quote(preview_file_two.to_str().unwrap()),
         state_dump = shell_quote(state_dump.to_str().unwrap())
     );
     fs::write(zdotdir.join(".zshrc"), zshrc).unwrap();
@@ -246,6 +255,29 @@ PROMPT='%# '
     assert!(binding.contains("aster-shift-tab"));
 
     Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0", "cd "])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+    dump_zle_state(&server);
+    let reordered_state = fs::read_to_string(&state_dump).unwrap();
+    let reordered_fields: Vec<_> = reordered_state.trim_end().split('|').collect();
+    assert_eq!(reordered_fields[0], "1", "cd path menu was not active");
+    assert!(
+        reordered_fields[1].parse::<usize>().unwrap() > 1,
+        "cd path menu did not contain multiple candidates: {reordered_state:?}"
+    );
+    assert_eq!(
+        reordered_fields[5], "1",
+        "async provider merging moved the menu away from row 1: {reordered_state:?}"
+    );
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(50));
+
+    Command::new("tmux")
         .args([
             "-L",
             &server,
@@ -366,8 +398,8 @@ PROMPT='%# '
     assert!(
         state_after_tab
             .contains("|aster-native-fixture native/|aster-native-fixture native/|path/file")
-            && state_after_tab.contains("|2|aster-native-fixture native/second/file"),
-        "Tab did not accept only the next path segment; state was {state_after_tab:?}:\n{segment_capture}"
+            && state_after_tab.contains("|1|aster-native-fixture native/path/file"),
+        "Tab did not accept the next path segment and reset selection; state was {state_after_tab:?}:\n{segment_capture}"
     );
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "Tab"])
@@ -381,9 +413,8 @@ PROMPT='%# '
     let second_segment_capture = capture_pane(&server, false);
     let state_after_second_tab = fs::read_to_string(&state_dump).unwrap();
     assert!(
-        state_after_second_tab.contains(
-            "|aster-native-fixture native/second/|aster-native-fixture native/second/|file"
-        ),
+        state_after_second_tab
+            .contains("|aster-native-fixture native/path/|aster-native-fixture native/path/|file"),
         "a repeated Tab did not accept the next path segment; state was {state_after_second_tab:?}:\n{second_segment_capture}"
     );
     Command::new("tmux")
@@ -392,16 +423,19 @@ PROMPT='%# '
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(4);
     let mut follow_up_capture = String::new();
+    let mut follow_up_state = String::new();
     while Instant::now() < deadline {
         follow_up_capture = capture_pane(&server, false);
-        if follow_up_capture.contains("aster-native-fixture native/second/file next-value") {
+        dump_zle_state(&server);
+        follow_up_state = fs::read_to_string(&state_dump).unwrap();
+        if follow_up_state.contains("next-value") {
             break;
         }
         thread::sleep(Duration::from_millis(50));
     }
     assert!(
-        follow_up_capture.contains("aster-native-fixture native/second/file next-value"),
-        "native completion did not continue after accepting a complete match:\n{follow_up_capture}"
+        follow_up_state.contains("next-value"),
+        "native completion did not continue after accepting a complete match; state was {follow_up_state:?}:\n{follow_up_capture}"
     );
 
     Command::new("tmux")
@@ -422,6 +456,66 @@ PROMPT='%# '
     assert!(
         !tab_capture.contains("completion cannot be used recursively"),
         "ticker entered completion recursively during native Tab:\n{tab_capture}"
+    );
+
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
+        .status()
+        .unwrap();
+    let scp_path_prefix = format!("scp -r {}/filesystem-", temporary.path().display());
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0"])
+        .arg(&scp_path_prefix)
+        .status()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut scp_capture = String::new();
+    while Instant::now() < deadline {
+        scp_capture = capture_pane(&server, false);
+        if scp_capture.contains("1/2") && scp_capture.matches("File").count() >= 2 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        scp_capture.contains("1/2") && scp_capture.matches("File").count() >= 2,
+        "generic filesystem candidates were absent for scp:\n{scp_capture}"
+    );
+    dump_zle_state(&server);
+    let scp_before_tab = fs::read_to_string(&state_dump).unwrap();
+    assert!(
+        scp_before_tab.contains(&format!("|{scp_path_prefix}|{scp_path_prefix}|")),
+        "Aster did not retain the scp path prefix: {scp_before_tab:?}"
+    );
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "Tab"])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(50));
+    dump_zle_state(&server);
+    let scp_after_tab = fs::read_to_string(&state_dump).unwrap();
+    assert!(
+        scp_after_tab.contains(&format!("|{scp_path_prefix}|{scp_path_prefix}|")),
+        "ambiguous path Tab selected an arbitrary file: {scp_after_tab:?}"
+    );
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0", "a"])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(100));
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "Tab"])
+        .status()
+        .unwrap();
+    dump_zle_state(&server);
+    let scp_unique_path = fs::read_to_string(&state_dump).unwrap();
+    assert!(
+        scp_unique_path.contains(&format!(
+            "|{}filesystem-alpha |{}filesystem-alpha |",
+            &scp_path_prefix[..scp_path_prefix.len() - "filesystem-".len()],
+            &scp_path_prefix[..scp_path_prefix.len() - "filesystem-".len()]
+        )),
+        "Tab did not accept the unique filesystem candidate: {scp_unique_path:?}"
     );
 
     Command::new("tmux")
@@ -586,6 +680,65 @@ PROMPT='%# '
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
+    thread::sleep(Duration::from_millis(300));
+
+    Command::new("tmux")
+        .args([
+            "-L",
+            &server,
+            "send-keys",
+            "-l",
+            "-t",
+            "test:0.0",
+            "echo first  stale",
+        ])
+        .status()
+        .unwrap();
+    dump_zle_state(&server);
+    let first_interrupted_fuzzy = fs::read_to_string(&state_dump).unwrap();
+    let first_interrupted_fields: Vec<_> = first_interrupted_fuzzy.trim_end().split('|').collect();
+    assert_eq!(first_interrupted_fields[7], "1");
+    assert_eq!(first_interrupted_fields[8], "echo first ");
+    assert_eq!(first_interrupted_fields[9], "stale");
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(300));
+
+    Command::new("tmux")
+        .args([
+            "-L",
+            &server,
+            "send-keys",
+            "-l",
+            "-t",
+            "test:0.0",
+            "echo second  fresh",
+        ])
+        .status()
+        .unwrap();
+    dump_zle_state(&server);
+    let second_fuzzy = fs::read_to_string(&state_dump).unwrap();
+    let second_fuzzy_fields: Vec<_> = second_fuzzy.trim_end().split('|').collect();
+    assert_eq!(second_fuzzy_fields[7], "1");
+    assert_eq!(second_fuzzy_fields[8], "echo second ");
+    assert_eq!(second_fuzzy_fields[9], "fresh");
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "Escape"])
+        .status()
+        .unwrap();
+    dump_zle_state(&server);
+    let escaped_second_fuzzy = fs::read_to_string(&state_dump).unwrap();
+    let escaped_second_fields: Vec<_> = escaped_second_fuzzy.trim_end().split('|').collect();
+    assert_eq!(escaped_second_fields[3], "echo second ");
+    assert_eq!(escaped_second_fields[7], "0");
+    assert_eq!(escaped_second_fields[8], "");
+    assert_eq!(escaped_second_fields[9], "");
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
+        .status()
+        .unwrap();
     Command::new("tmux")
         .args([
             "-L",
@@ -681,6 +834,30 @@ PROMPT='%# '
     assert!(
         preview_capture.contains("preview-first-line") && preview_capture.contains("Preview:"),
         "lazy wide-terminal file preview was absent; state was {preview_state:?}:\n{preview_capture}"
+    );
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-n"])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(20));
+    let switching_preview = capture_pane(&server, false);
+    assert!(
+        !switching_preview.contains("preview-first-line"),
+        "the previous preview remained visible while switching rows:\n{switching_preview}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut second_preview = String::new();
+    while Instant::now() < deadline {
+        second_preview = capture_pane(&server, false);
+        if second_preview.contains("preview-other-candidate") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        second_preview.contains("preview-other-candidate")
+            && !second_preview.contains("preview-first-line"),
+        "the second preview did not replace the first cleanly:\n{second_preview}"
     );
     Command::new("tmux")
         .args([

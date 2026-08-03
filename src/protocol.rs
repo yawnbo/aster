@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequestEnvelope {
@@ -62,6 +62,7 @@ pub struct CompletionResponse {
     pub replace_start_byte: usize,
     pub replace_end_byte: usize,
     pub candidates: Vec<Candidate>,
+    pub enrichment_pending: bool,
 }
 
 impl CompletionResponse {
@@ -70,6 +71,7 @@ impl CompletionResponse {
             replace_start_byte: cursor_byte,
             replace_end_byte: cursor_byte,
             candidates: Vec::new(),
+            enrichment_pending: false,
         }
     }
 }
@@ -90,6 +92,9 @@ pub struct Candidate {
 pub enum CandidateKind {
     History,
     Command,
+    File,
+    Directory,
+    Option,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -97,4 +102,6 @@ pub enum CandidateKind {
 pub enum CandidateSource {
     History,
     Command,
+    Filesystem,
+    Help,
 }

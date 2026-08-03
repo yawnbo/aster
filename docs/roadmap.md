@@ -17,10 +17,10 @@
 - Bound execution time, output bytes, stdin, pager, and color environment.
 - Parse exact man `NAME` entries and conservative generic help summaries.
 - Cache descriptions and misses by executable identity and timestamps.
-- Parse common Clap, Cobra, Click, argparse, and Go flag layouts for structured
-  candidates.
+- Parse common GNU, rendered man, Clap, Cobra, Click, and argparse flag layouts
+  for root-command option candidates.
 - Extend the cache key with subcommand paths.
-- Return only options, subcommands, and documented enum values.
+- Add subcommands and documented enum values.
 
 ## Phase 3: Interactive UI
 
@@ -32,7 +32,8 @@
 
 ## Phase 4: Explicit Dynamic Providers
 
-- Filesystem path segments.
+- Filesystem path segments at every argument position, with bounded scans,
+  shell-safe escaping, and unambiguous Tab acceptance.
 - Broaden native Zsh capture beyond append-safe candidates and preserve native
   display descriptions, quoting, suffix removal, and replacement ranges.
 - Daemon-side executables, aliases, functions, and environment variable names.
@@ -40,8 +41,9 @@
 - Package scripts and build targets.
 - Optional project-aware vocabulary provider.
 
-Dynamic providers must be selected by known argument type. Aster should abstain
-when it cannot justify the candidate kind.
+Filesystem candidates are the conservative default at argument positions.
+Other dynamic providers must be selected by a known argument type; Aster should
+abstain when it cannot justify the candidate kind.
 
 ## Non-Goals
 

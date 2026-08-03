@@ -14,9 +14,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 3;
 const CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const OUTPUT_MAX_BYTES: u64 = 64 * 1024;
+const MAX_OPTION_COUNT: usize = 256;
+const MAX_OPTION_SPELLING_BYTES: usize = 128;
 const QUEUE_CAPACITY: usize = 64;
 const WORKER_COUNT: usize = 2;
 const SUCCESS_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -39,6 +41,18 @@ pub struct CommandMatch {
     pub description_pending: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionMatch {
+    pub spelling: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionMatches {
+    pub entries: Vec<OptionMatch>,
+    pub pending: bool,
+}
+
 #[derive(Debug)]
 pub struct CommandCatalog {
     entries: Vec<CommandEntry>,
@@ -50,6 +64,7 @@ pub struct CommandCatalog {
 #[derive(Debug, Default)]
 struct EnrichmentState {
     descriptions: HashMap<String, String>,
+    options: HashMap<String, Vec<OptionMatch>>,
     settled: HashSet<String>,
     pending: HashSet<String>,
 }
@@ -59,6 +74,7 @@ struct DescriptionJob {
     name: String,
     path: PathBuf,
     fingerprint: ExecutableFingerprint,
+    authored_description: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,6 +95,13 @@ struct CachedDescription {
     fingerprint: ExecutableFingerprint,
     checked_at_secs: u64,
     description: Option<String>,
+    options: Vec<OptionMatch>,
+}
+
+#[derive(Debug, Default)]
+struct Enrichment {
+    description: Option<String>,
+    options: Vec<OptionMatch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,7 +156,7 @@ impl CommandCatalog {
                     let Some(name) = child.file_name().to_str().map(str::to_owned) else {
                         continue;
                     };
-                    if !valid_name(&name) || seen.contains(&name) {
+                    if !valid_name(&name) || jobs.contains_key(&name) {
                         continue;
                     }
                     let path = child.path();
@@ -143,33 +166,37 @@ impl CommandCatalog {
                     if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
                         continue;
                     }
-                    seen.insert(name.clone());
                     let authored = known_description(&name);
-                    entries.push(CommandEntry {
-                        description: authored
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| fallback_description(&path)),
-                        name: name.clone(),
-                    });
-
-                    if authored.is_none() && !name.starts_with('-') {
-                        let fingerprint = fingerprint(&path, &metadata);
-                        let job = DescriptionJob {
+                    let authored_description = !seen.insert(name.clone()) || authored.is_some();
+                    if !authored_description || authored.is_some() {
+                        entries.push(CommandEntry {
+                            description: authored
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| fallback_description(&path)),
                             name: name.clone(),
-                            path,
-                            fingerprint,
-                        };
-                        if let Some(cached) = cache.entries.get(&name)
-                            && cached.fingerprint == job.fingerprint
-                            && cache_is_fresh(cached, now)
-                        {
-                            state.settled.insert(name.clone());
-                            if let Some(description) = &cached.description {
-                                state.descriptions.insert(name.clone(), description.clone());
-                            }
-                        }
-                        jobs.insert(name, job);
+                        });
                     }
+
+                    let fingerprint = fingerprint(&path, &metadata);
+                    let job = DescriptionJob {
+                        name: name.clone(),
+                        path,
+                        fingerprint,
+                        authored_description,
+                    };
+                    if let Some(cached) = cache.entries.get(&name)
+                        && cached.fingerprint == job.fingerprint
+                        && cache_is_fresh(cached, now)
+                    {
+                        state.settled.insert(name.clone());
+                        if !authored_description && let Some(description) = &cached.description {
+                            state.descriptions.insert(name.clone(), description.clone());
+                        }
+                        if !cached.options.is_empty() {
+                            state.options.insert(name.clone(), cached.options.clone());
+                        }
+                    }
+                    jobs.insert(name, job);
                 }
             }
         }
@@ -192,31 +219,19 @@ impl CommandCatalog {
             .filter(|entry| entry.name.starts_with(prefix))
             .take(limit)
             .map(|entry| {
-                let description = state
-                    .descriptions
-                    .get(&entry.name)
-                    .cloned()
-                    .unwrap_or_else(|| entry.description.clone());
-                let mut description_pending = false;
-
-                if let (Some(job), Some(queue)) = (self.jobs.get(&entry.name), self.queue.as_ref())
-                    && !state.settled.contains(&entry.name)
-                {
-                    description_pending = true;
-                    if state.pending.insert(entry.name.clone()) {
-                        match queue.try_send(job.clone()) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(_)) => {
-                                state.pending.remove(&entry.name);
-                            }
-                            Err(TrySendError::Disconnected(_)) => {
-                                state.pending.remove(&entry.name);
-                                state.settled.insert(entry.name.clone());
-                                description_pending = false;
-                            }
-                        }
-                    }
-                }
+                let job = self.jobs.get(&entry.name);
+                let description = if job.is_some_and(|job| job.authored_description) {
+                    entry.description.clone()
+                } else {
+                    state
+                        .descriptions
+                        .get(&entry.name)
+                        .cloned()
+                        .unwrap_or_else(|| entry.description.clone())
+                };
+                let metadata_pending = enqueue_if_unsettled(&mut state, job, self.queue.as_ref());
+                let description_pending =
+                    metadata_pending && !job.is_some_and(|job| job.authored_description);
 
                 CommandMatch {
                     name: entry.name.clone(),
@@ -227,17 +242,46 @@ impl CommandCatalog {
             .collect()
     }
 
+    pub fn matching_options(&self, command: &str, prefix: &str, limit: usize) -> OptionMatches {
+        let Some(job) = self.jobs.get(command) else {
+            return OptionMatches {
+                entries: Vec::new(),
+                pending: false,
+            };
+        };
+        let mut state = self.state.lock().expect("command state lock poisoned");
+        let pending = enqueue_if_unsettled(&mut state, Some(job), self.queue.as_ref());
+        let entries = state
+            .options
+            .get(command)
+            .into_iter()
+            .flatten()
+            .filter(|option| option.spelling.starts_with(prefix))
+            .take(limit)
+            .cloned()
+            .collect();
+        OptionMatches { entries, pending }
+    }
+
     pub fn inventory(&self) -> Vec<CommandMatch> {
         let state = self.state.lock().expect("command state lock poisoned");
         self.entries
             .iter()
             .map(|entry| CommandMatch {
                 name: entry.name.clone(),
-                description: state
-                    .descriptions
+                description: if self
+                    .jobs
                     .get(&entry.name)
-                    .cloned()
-                    .unwrap_or_else(|| entry.description.clone()),
+                    .is_some_and(|job| job.authored_description)
+                {
+                    entry.description.clone()
+                } else {
+                    state
+                        .descriptions
+                        .get(&entry.name)
+                        .cloned()
+                        .unwrap_or_else(|| entry.description.clone())
+                },
                 description_pending: false,
             })
             .collect()
@@ -252,6 +296,66 @@ impl CommandCatalog {
             ..Self::default()
         }
     }
+
+    #[cfg(test)]
+    pub fn from_options(command: &str, options: Vec<OptionMatch>) -> Self {
+        let entry = CommandEntry {
+            name: command.to_owned(),
+            description: "Test command".to_owned(),
+        };
+        let job = DescriptionJob {
+            name: command.to_owned(),
+            path: PathBuf::from(command),
+            fingerprint: ExecutableFingerprint {
+                path: PathBuf::from(command),
+                size: 0,
+                device: 0,
+                inode: 0,
+                mode: 0,
+                modified_secs: 0,
+                modified_nanos: 0,
+                changed_secs: 0,
+                changed_nanos: 0,
+            },
+            authored_description: true,
+        };
+        let mut state = EnrichmentState::default();
+        state.options.insert(command.to_owned(), options);
+        state.settled.insert(command.to_owned());
+        Self {
+            entries: vec![entry],
+            jobs: HashMap::from([(command.to_owned(), job)]),
+            state: Arc::new(Mutex::new(state)),
+            queue: None,
+        }
+    }
+}
+
+fn enqueue_if_unsettled(
+    state: &mut EnrichmentState,
+    job: Option<&DescriptionJob>,
+    queue: Option<&SyncSender<DescriptionJob>>,
+) -> bool {
+    let (Some(job), Some(queue)) = (job, queue) else {
+        return false;
+    };
+    if state.settled.contains(&job.name) {
+        return false;
+    }
+    if state.pending.insert(job.name.clone()) {
+        match queue.try_send(job.clone()) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                state.pending.remove(&job.name);
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                state.pending.remove(&job.name);
+                state.settled.insert(job.name.clone());
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn start_workers(
@@ -296,18 +400,29 @@ fn description_worker(
         };
 
         let unchanged_before = fingerprint_matches(&job);
-        let description = unchanged_before
-            .then(|| discover_description(&job, cache_file.parent().unwrap_or(Path::new("/tmp"))))
-            .flatten();
+        let enrichment = if unchanged_before {
+            discover_enrichment(&job, cache_file.parent().unwrap_or(Path::new("/tmp")))
+        } else {
+            Enrichment::default()
+        };
         let cacheable = unchanged_before && fingerprint_matches(&job);
         {
             let mut state = state.lock().expect("command state lock poisoned");
             state.pending.remove(&job.name);
             state.settled.insert(job.name.clone());
-            if cacheable && let Some(description) = &description {
-                state
-                    .descriptions
-                    .insert(job.name.clone(), description.clone());
+            if cacheable {
+                if !job.authored_description
+                    && let Some(description) = &enrichment.description
+                {
+                    state
+                        .descriptions
+                        .insert(job.name.clone(), description.clone());
+                }
+                if !enrichment.options.is_empty() {
+                    state
+                        .options
+                        .insert(job.name.clone(), enrichment.options.clone());
+                }
             }
         }
 
@@ -318,7 +433,8 @@ fn description_worker(
                 CachedDescription {
                     fingerprint: job.fingerprint,
                     checked_at_secs: now_secs(),
-                    description,
+                    description: enrichment.description,
+                    options: enrichment.options,
                 },
             );
             let _ = save_cache(cache_file, &cache);
@@ -326,17 +442,29 @@ fn description_worker(
     }
 }
 
-fn discover_description(job: &DescriptionJob, output_dir: &Path) -> Option<String> {
-    man_description(&job.name, output_dir).or_else(|| help_description(job, output_dir))
+fn discover_enrichment(job: &DescriptionJob, output_dir: &Path) -> Enrichment {
+    let mut enrichment = man_enrichment(&job.name, output_dir).unwrap_or_default();
+    if (enrichment.description.is_none() || enrichment.options.is_empty())
+        && let Some(help) = help_enrichment(job, output_dir)
+    {
+        if enrichment.description.is_none() {
+            enrichment.description = help.description;
+        }
+        if enrichment.options.is_empty() {
+            enrichment.options = help.options;
+        }
+    }
+    enrichment
 }
 
-fn man_description(name: &str, output_dir: &Path) -> Option<String> {
+fn man_enrichment(name: &str, output_dir: &Path) -> Option<Enrichment> {
     let man = Path::new("/usr/bin/man");
     if !man.is_file() {
         return None;
     }
     let mut command = Command::new(man);
     command
+        .arg("--")
         .arg(name)
         .env_clear()
         .env("HOME", "/nonexistent")
@@ -344,11 +472,14 @@ fn man_description(name: &str, output_dir: &Path) -> Option<String> {
         .env("MANPAGER", "cat")
         .env("PAGER", "cat");
     let output = run_bounded(command, output_dir, MAN_TIMEOUT)?;
-    parse_man_description(name, &output)
+    Some(Enrichment {
+        description: parse_man_description(name, &output),
+        options: parse_options(&output),
+    })
 }
 
 #[cfg(target_os = "macos")]
-fn help_description(job: &DescriptionJob, output_dir: &Path) -> Option<String> {
+fn help_enrichment(job: &DescriptionJob, output_dir: &Path) -> Option<Enrichment> {
     let sandbox = Path::new("/usr/bin/sandbox-exec");
     if !sandbox.is_file() {
         return None;
@@ -370,11 +501,14 @@ fn help_description(job: &DescriptionJob, output_dir: &Path) -> Option<String> {
         .env("MANPAGER", "cat")
         .env("TERM", "dumb");
     let output = run_bounded(command, output_dir, HELP_TIMEOUT)?;
-    parse_help_description(&job.name, &output)
+    Some(Enrichment {
+        description: parse_help_description(&job.name, &output),
+        options: parse_options(&output),
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
-fn help_description(_job: &DescriptionJob, _output_dir: &Path) -> Option<String> {
+fn help_enrichment(_job: &DescriptionJob, _output_dir: &Path) -> Option<Enrichment> {
     None
 }
 
@@ -528,41 +662,361 @@ fn parse_help_description(name: &str, output: &str) -> Option<String> {
     None
 }
 
-fn clean_lines(output: &str) -> impl Iterator<Item = String> + '_ {
-    output.lines().filter_map(|line| {
-        let mut clean = String::with_capacity(line.len());
-        let mut escape = 0;
-        for character in line.chars() {
-            if escape == 1 {
-                escape = match character {
-                    '[' => 2,
-                    ']' => 3,
-                    _ => 0,
-                };
-                continue;
+fn parse_options(output: &str) -> Vec<OptionMatch> {
+    let mut entries: Vec<OptionMatch> = Vec::new();
+    let mut in_options = false;
+    let mut section_indent = 0;
+    let mut continuation_indexes = Vec::new();
+    let mut declaration_indent = 0;
+
+    for raw_line in output.lines() {
+        let Some(line) = clean_line(raw_line) else {
+            continuation_indexes.clear();
+            continue;
+        };
+        let text = line.trim();
+        let indent = line.len() - line.trim_start_matches(' ').len();
+
+        if is_options_heading(text) {
+            if in_options {
+                break;
             }
-            if escape == 2 {
-                if ('@'..='~').contains(&character) {
-                    escape = 0;
+            in_options = true;
+            section_indent = indent;
+            continuation_indexes.clear();
+            continue;
+        }
+        if !in_options {
+            continue;
+        }
+        if indent <= section_indent && is_section_heading(text) {
+            break;
+        }
+
+        if !option_line_has_unsafe_data(raw_line)
+            && let Some(declaration) = parse_option_declaration(text)
+        {
+            continuation_indexes.clear();
+            declaration_indent = indent;
+            for spelling in declaration.spellings {
+                if let Some(index) = entries
+                    .iter()
+                    .position(|option| option.spelling == spelling)
+                {
+                    if entries[index].description.is_empty()
+                        && let Some(description) = &declaration.description
+                    {
+                        entries[index].description = description.clone();
+                    }
+                    continuation_indexes.push(index);
+                } else if entries.len() < MAX_OPTION_COUNT {
+                    entries.push(OptionMatch {
+                        spelling,
+                        description: declaration.description.clone().unwrap_or_default(),
+                    });
+                    continuation_indexes.push(entries.len() - 1);
                 }
+            }
+            continue;
+        }
+
+        if !continuation_indexes.is_empty()
+            && indent > declaration_indent
+            && !text.starts_with('-')
+            && !is_section_heading(text)
+            && let Some(continuation) = sanitize_description(text)
+        {
+            for &index in &continuation_indexes {
+                let combined = if entries[index].description.is_empty() {
+                    continuation.clone()
+                } else {
+                    format!("{} {continuation}", entries[index].description)
+                };
+                if let Some(description) = sanitize_description(&combined) {
+                    entries[index].description = description;
+                }
+            }
+        } else {
+            continuation_indexes.clear();
+        }
+    }
+
+    entries
+}
+
+struct ParsedOptionDeclaration {
+    spellings: Vec<String>,
+    description: Option<String>,
+}
+
+fn parse_option_declaration(line: &str) -> Option<ParsedOptionDeclaration> {
+    if !line.starts_with('-') {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    let mut position = 0;
+    let mut spellings = Vec::new();
+
+    loop {
+        let (spelling, end) = option_spelling_at(line, position)?;
+        spellings.push(spelling.to_owned());
+        position = end;
+
+        if bytes.get(position) == Some(&b'=') {
+            position += 1;
+            let argument_start = position;
+            while bytes
+                .get(position)
+                .is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b',')
+            {
+                position += 1;
+            }
+            if position == argument_start {
+                return None;
+            }
+        } else if bytes.get(position) == Some(&b'[') {
+            let argument_end = bytes[position..].iter().position(|byte| *byte == b']')? + position;
+            let argument = &line[position + 1..argument_end];
+            if !argument.strip_prefix('=').is_some_and(is_option_argument) {
+                return None;
+            }
+            position = argument_end + 1;
+        }
+
+        if bytes.get(position) == Some(&b',') {
+            position += 1;
+            skip_ascii_spaces(bytes, &mut position);
+            if bytes.get(position) == Some(&b'-') {
                 continue;
             }
-            if escape == 3 {
+            return None;
+        }
+
+        if position == bytes.len() {
+            break;
+        }
+        if !bytes[position].is_ascii_whitespace() {
+            return None;
+        }
+        skip_ascii_spaces(bytes, &mut position);
+        if position == bytes.len() {
+            break;
+        }
+        if bytes[position] == b'/' {
+            position += 1;
+            skip_ascii_spaces(bytes, &mut position);
+            continue;
+        }
+        if bytes[position] == b'-' {
+            continue;
+        }
+
+        let token_end = bytes[position..]
+            .iter()
+            .position(u8::is_ascii_whitespace)
+            .map_or(bytes.len(), |offset| position + offset);
+        let argument = line[position..token_end].trim_end_matches(',');
+        if is_option_argument(argument) {
+            position = token_end;
+            skip_ascii_spaces(bytes, &mut position);
+            if line[..token_end].ends_with(',') {
                 continue;
-            }
-            if character == '\u{1b}' {
-                escape = 1;
-            } else if character == '\u{8}' {
-                clean.pop();
-            } else if character == '\t' {
-                clean.push(' ');
-            } else if !character.is_control() && !is_directional_format(character) {
-                clean.push(character);
             }
         }
-        let clean = clean.trim().to_owned();
-        (!clean.is_empty()).then_some(clean)
+        let description = (position < bytes.len())
+            .then(|| sanitize_description(&line[position..]))
+            .flatten();
+        return Some(ParsedOptionDeclaration {
+            spellings,
+            description,
+        });
+    }
+
+    Some(ParsedOptionDeclaration {
+        spellings,
+        description: None,
     })
+}
+
+fn option_spelling_at(line: &str, position: usize) -> Option<(&str, usize)> {
+    let bytes = line.as_bytes();
+    if bytes.get(position) != Some(&b'-') {
+        return None;
+    }
+    let mut end = position + 1;
+    if bytes.get(end) == Some(&b'-') {
+        end += 1;
+        let name_start = end;
+        while bytes
+            .get(end)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            end += 1;
+        }
+        if end == name_start {
+            return None;
+        }
+    } else {
+        if !bytes.get(end).is_some_and(u8::is_ascii_alphanumeric) {
+            return None;
+        }
+        end += 1;
+    }
+
+    let spelling = &line[position..end];
+    let delimiter = bytes.get(end);
+    if !valid_option_spelling(spelling)
+        || delimiter
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && !matches!(byte, b',' | b'=' | b'['))
+    {
+        return None;
+    }
+    Some((spelling, end))
+}
+
+fn valid_option_spelling(spelling: &str) -> bool {
+    if !spelling.is_ascii()
+        || spelling.len() > MAX_OPTION_SPELLING_BYTES
+        || !spelling.starts_with('-')
+    {
+        return false;
+    }
+    let bytes = spelling.as_bytes();
+    if bytes.get(1) == Some(&b'-') {
+        bytes.len() >= 3
+            && bytes[2].is_ascii_alphanumeric()
+            && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+            && bytes[2..]
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    } else {
+        bytes.len() == 2 && bytes[1].is_ascii_alphanumeric()
+    }
+}
+
+fn option_line_has_unsafe_data(line: &str) -> bool {
+    let characters: Vec<_> = line.chars().collect();
+    characters.iter().enumerate().any(|(index, &character)| {
+        if is_directional_format(character) {
+            return true;
+        }
+        if character == '\u{8}' {
+            return index == 0
+                || index + 1 == characters.len()
+                || (characters[index - 1] != characters[index + 1]
+                    && characters[index - 1] != '_');
+        }
+        character.is_control() && character != '\t'
+    })
+}
+
+fn is_option_argument(token: &str) -> bool {
+    let token = token
+        .strip_prefix('<')
+        .and_then(|token| token.strip_suffix('>'))
+        .or_else(|| {
+            token
+                .strip_prefix('[')
+                .and_then(|token| token.strip_suffix(']'))
+        })
+        .unwrap_or(token)
+        .trim_end_matches("...");
+    !token.is_empty()
+        && token.is_ascii()
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn skip_ascii_spaces(bytes: &[u8], position: &mut usize) {
+    while bytes.get(*position).is_some_and(u8::is_ascii_whitespace) {
+        *position += 1;
+    }
+}
+
+fn is_options_heading(line: &str) -> bool {
+    matches!(
+        line.trim_end_matches(':').to_ascii_lowercase().as_str(),
+        "option"
+            | "options"
+            | "flags"
+            | "global options"
+            | "general options"
+            | "optional arguments"
+            | "the following options are available"
+    )
+}
+
+fn is_section_heading(line: &str) -> bool {
+    let heading = line.trim_end_matches(':');
+    let lower = heading.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "usage"
+            | "arguments"
+            | "commands"
+            | "available commands"
+            | "examples"
+            | "description"
+            | "synopsis"
+            | "operands"
+            | "environment"
+            | "exit status"
+            | "files"
+            | "authors"
+            | "bugs"
+            | "see also"
+    ) {
+        return true;
+    }
+    heading
+        .chars()
+        .any(|character| character.is_ascii_alphabetic())
+        && heading
+            .chars()
+            .all(|character| !character.is_ascii_alphabetic() || character.is_ascii_uppercase())
+}
+
+fn clean_lines(output: &str) -> impl Iterator<Item = String> + '_ {
+    output
+        .lines()
+        .filter_map(clean_line)
+        .map(|line| line.trim().to_owned())
+}
+
+fn clean_line(line: &str) -> Option<String> {
+    let mut clean = String::with_capacity(line.len());
+    let mut escape = 0;
+    for character in line.chars() {
+        if escape == 1 {
+            escape = match character {
+                '[' => 2,
+                ']' => 3,
+                _ => 0,
+            };
+            continue;
+        }
+        if escape == 2 {
+            if ('@'..='~').contains(&character) {
+                escape = 0;
+            }
+            continue;
+        }
+        if escape == 3 {
+            continue;
+        }
+        if character == '\u{1b}' {
+            escape = 1;
+        } else if character == '\u{8}' {
+            clean.pop();
+        } else if character == '\t' {
+            clean.push(' ');
+        } else if !character.is_control() && !is_directional_format(character) {
+            clean.push(character);
+        }
+    }
+    let clean = clean.trim_end().to_owned();
+    (!clean.trim().is_empty()).then_some(clean)
 }
 
 fn sanitize_description(description: &str) -> Option<String> {
@@ -592,16 +1046,43 @@ fn load_cache(path: &Path) -> DescriptionCache {
     let Ok(bytes) = fs::read(path) else {
         return DescriptionCache::default();
     };
-    let Ok(cache) = serde_json::from_slice::<DescriptionCache>(&bytes) else {
+    let Ok(mut cache) = serde_json::from_slice::<DescriptionCache>(&bytes) else {
         return DescriptionCache::default();
     };
     if cache.version != CACHE_VERSION {
         return DescriptionCache::default();
     }
+    for cached in cache.entries.values_mut() {
+        let mut seen = HashSet::new();
+        cached.options.retain_mut(|option| {
+            if !valid_option_spelling(&option.spelling) || !seen.insert(option.spelling.clone()) {
+                return false;
+            }
+            option.description = sanitize_description(&option.description).unwrap_or_default();
+            true
+        });
+        cached.options.truncate(MAX_OPTION_COUNT);
+    }
     cache
 }
 
 fn save_cache(path: &Path, cache: &DescriptionCache) -> std::io::Result<()> {
+    let mut bounded = cache.clone();
+    let bytes = loop {
+        let bytes = serde_json::to_vec(&bounded)?;
+        if bytes.len() as u64 <= CACHE_MAX_BYTES || bounded.entries.is_empty() {
+            break bytes;
+        }
+        let Some(oldest) = bounded
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.checked_at_secs)
+            .map(|(name, _)| name.clone())
+        else {
+            break bytes;
+        };
+        bounded.entries.remove(&oldest);
+    };
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
     let result = (|| {
@@ -610,7 +1091,7 @@ fn save_cache(path: &Path, cache: &DescriptionCache) -> std::io::Result<()> {
             .write(true)
             .mode(0o600)
             .open(&temporary)?;
-        serde_json::to_writer(&mut file, cache)?;
+        file.write_all(&bytes)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
         fs::rename(&temporary, path)
@@ -622,7 +1103,7 @@ fn save_cache(path: &Path, cache: &DescriptionCache) -> std::io::Result<()> {
 }
 
 fn cache_is_fresh(cached: &CachedDescription, now: u64) -> bool {
-    let ttl = if cached.description.is_some() {
+    let ttl = if !cached.options.is_empty() {
         SUCCESS_TTL
     } else {
         MISS_TTL
@@ -817,6 +1298,106 @@ mod tests {
     }
 
     #[test]
+    fn parses_rendered_man_option_declarations_and_continuations() {
+        let output = "NAME\n    tool - inspect things\nThe following options are available:\n\
+                      \x20   -a, --all\n\
+                      \x20       Include hidden entries.\n\
+                      \x20   -o, --output FILE  Write to FILE.\n\
+                      \x20       --color=WHEN    Control colored output.\nARGUMENTS\n\
+                      \x20   FILE  Input file.\n";
+
+        assert_eq!(
+            parse_options(output),
+            [
+                OptionMatch {
+                    spelling: "-a".to_owned(),
+                    description: "Include hidden entries.".to_owned(),
+                },
+                OptionMatch {
+                    spelling: "--all".to_owned(),
+                    description: "Include hidden entries.".to_owned(),
+                },
+                OptionMatch {
+                    spelling: "-o".to_owned(),
+                    description: "Write to FILE.".to_owned(),
+                },
+                OptionMatch {
+                    spelling: "--output".to_owned(),
+                    description: "Write to FILE.".to_owned(),
+                },
+                OptionMatch {
+                    spelling: "--color".to_owned(),
+                    description: "Control colored output.".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_common_help_option_sections() {
+        let clap = "Usage: tool [OPTIONS]\n\nOptions:\n  -q, --quiet       Suppress output\n\
+                    \x20     --format <FORMAT>  Select a format\n";
+        let cobra = "Flags:\n  -h, --help   help for tool\nCommands:\n  child\n";
+        let click = "Options:\n  --color / --no-color  Toggle color.\n  --help                  Show this message.\n";
+        let argparse = "optional arguments:\n  -v, --verbose    increase verbosity\n  -o OUTPUT, --output OUTPUT  destination\n  --color[=WHEN]  color mode\n";
+
+        assert_eq!(
+            parse_options(clap)
+                .into_iter()
+                .map(|option| option.spelling)
+                .collect::<Vec<_>>(),
+            ["-q", "--quiet", "--format"]
+        );
+        assert_eq!(
+            parse_options(cobra),
+            [
+                OptionMatch {
+                    spelling: "-h".to_owned(),
+                    description: "help for tool".to_owned(),
+                },
+                OptionMatch {
+                    spelling: "--help".to_owned(),
+                    description: "help for tool".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(parse_options(click).len(), 3);
+        assert_eq!(
+            parse_options(argparse)
+                .into_iter()
+                .map(|option| option.spelling)
+                .collect::<Vec<_>>(),
+            ["-v", "--verbose", "-o", "--output", "--color"]
+        );
+    }
+
+    #[test]
+    fn rejects_usage_prose_subcommands_and_malicious_option_spellings() {
+        let output = "Usage: tool --usage-only\n\
+                      \x20Prose mentions --prose-only but is not an option.\n\
+                      \x20Options:\n\
+                      \x20  --safe        Safe option.\n\
+                      \x20  --bad;touch   Not safe.\n\
+                      \x20  --also$(evil) Not safe.\n\
+                      \x20  --con\u{7}trol Control data.\n\
+                      \x20  -abc          Combined spelling.\n\
+                      \x20  —lookalike    Unicode dash.\n\
+                      \x20Commands:\n\
+                      \x20  child\n\
+                      \x20Options:\n\
+                      \x20  --child-only  Child option.\n";
+
+        assert_eq!(
+            parse_options(output),
+            [OptionMatch {
+                spelling: "--safe".to_owned(),
+                description: "Safe option.".to_owned(),
+            }]
+        );
+        assert!(!option_line_has_unsafe_data("-\u{8}-, h\u{8}h"));
+    }
+
+    #[test]
     fn strips_terminal_controls_from_descriptions() {
         let output = "tool(1) - \u{1b}[31mred\u{1b}[0m\u{202e} text\n";
         assert_eq!(
@@ -846,6 +1427,10 @@ mod tests {
                 },
                 checked_at_secs: 7,
                 description: Some("Inspect a tool".to_owned()),
+                options: vec![OptionMatch {
+                    spelling: "--verbose".to_owned(),
+                    description: "Show more detail".to_owned(),
+                }],
             },
         );
 
@@ -856,6 +1441,93 @@ mod tests {
             Some("Inspect a tool")
         );
         assert_eq!(loaded.entries["tool"].fingerprint.size, 42);
+        assert_eq!(
+            loaded.entries["tool"].options,
+            [OptionMatch {
+                spelling: "--verbose".to_owned(),
+                description: "Show more detail".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn authored_descriptions_remain_preferred_during_enrichment() {
+        let job = test_job("cargo", true);
+        let mut state = EnrichmentState::default();
+        state
+            .descriptions
+            .insert("cargo".to_owned(), "Parsed description".to_owned());
+        let catalog = CommandCatalog {
+            entries: vec![CommandEntry {
+                name: "cargo".to_owned(),
+                description: "Rust package manager and build tool".to_owned(),
+            }],
+            jobs: HashMap::from([("cargo".to_owned(), job)]),
+            state: Arc::new(Mutex::new(state)),
+            queue: None,
+        };
+
+        assert_eq!(
+            catalog.matching("cargo", 1)[0].description,
+            "Rust package manager and build tool"
+        );
+    }
+
+    #[test]
+    fn matches_cached_options_by_prefix_for_an_exact_command() {
+        let mut state = EnrichmentState::default();
+        state.settled.insert("tool".to_owned());
+        state.options.insert(
+            "tool".to_owned(),
+            vec![
+                OptionMatch {
+                    spelling: "--all".to_owned(),
+                    description: "Include all".to_owned(),
+                },
+                OptionMatch {
+                    spelling: "--color".to_owned(),
+                    description: "Control color".to_owned(),
+                },
+                OptionMatch {
+                    spelling: "-v".to_owned(),
+                    description: "Verbose".to_owned(),
+                },
+            ],
+        );
+        let catalog = CommandCatalog {
+            jobs: HashMap::from([("tool".to_owned(), test_job("tool", false))]),
+            state: Arc::new(Mutex::new(state)),
+            ..CommandCatalog::default()
+        };
+
+        let matches = catalog.matching_options("tool", "--", 1);
+        assert_eq!(matches.entries[0].spelling, "--all");
+        assert!(!matches.pending);
+        assert!(
+            catalog
+                .matching_options("unknown", "-", 10)
+                .entries
+                .is_empty()
+        );
+        assert!(!catalog.matching_options("unknown", "-", 10).pending);
+    }
+
+    #[test]
+    fn unsettled_options_report_pending_without_blocking_on_a_full_queue() {
+        let (sender, _receiver) = sync_channel(1);
+        sender.try_send(test_job("queued", false)).unwrap();
+        let catalog = CommandCatalog {
+            jobs: HashMap::from([("tool".to_owned(), test_job("tool", false))]),
+            queue: Some(sender),
+            ..CommandCatalog::default()
+        };
+        let started = Instant::now();
+
+        let matches = catalog.matching_options("tool", "--", 10);
+
+        assert!(matches.entries.is_empty());
+        assert!(matches.pending);
+        assert!(started.elapsed() < Duration::from_millis(100));
     }
 
     #[test]
@@ -870,5 +1542,24 @@ mod tests {
             Some("")
         );
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    fn test_job(name: &str, authored_description: bool) -> DescriptionJob {
+        DescriptionJob {
+            name: name.to_owned(),
+            path: PathBuf::from(format!("/usr/bin/{name}")),
+            fingerprint: ExecutableFingerprint {
+                path: PathBuf::from(format!("/usr/bin/{name}")),
+                size: 1,
+                device: 1,
+                inode: 1,
+                mode: 0o100755,
+                modified_secs: 1,
+                modified_nanos: 1,
+                changed_secs: 1,
+                changed_nanos: 1,
+            },
+            authored_description,
+        }
     }
 }

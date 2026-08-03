@@ -180,11 +180,10 @@ fn handle_connection(
         },
     };
     let should_shutdown = matches!(response, Response::ShuttingDown);
-    write_response(&mut stream, &response)?;
     if should_shutdown {
         shutdown.store(true, Ordering::Release);
     }
-    Ok(())
+    write_response(&mut stream, &response)
 }
 
 fn dispatch(
@@ -236,15 +235,24 @@ fn dispatch(
             if cwd.len() > MAX_PATH_BYTES {
                 bail!("working directory is too long");
             }
-            let completion = engine::complete(
-                &store.lock().expect("store lock poisoned"),
-                commands,
-                &buffer,
-                cursor_byte,
-                &cwd,
-                limit,
-                settings,
-            )?;
+            let mut completion = {
+                let store = store.lock().expect("store lock poisoned");
+                engine::complete(
+                    &store,
+                    commands,
+                    &buffer,
+                    cursor_byte,
+                    &cwd,
+                    limit,
+                    settings,
+                )?
+            };
+            let limit = limit
+                .unwrap_or(settings.completion.max_candidates)
+                .min(settings.completion.max_candidates);
+            let paths =
+                engine::filesystem_candidates(&buffer, cursor_byte, &cwd, limit.saturating_add(1))?;
+            engine::merge_filesystem_candidates(&mut completion, paths, limit);
             Ok(Response::Completion(completion))
         }
         Request::Fuzzy { query, cwd, limit } => {

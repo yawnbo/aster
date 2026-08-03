@@ -101,6 +101,7 @@ enum OutputFormat {
     Insert,
     Zsh,
     ZshV2,
+    ZshV3,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -589,17 +590,30 @@ fn write_completion(response: Response, format: OutputFormat) -> Result<()> {
                 print!("{}", candidate.accept_text);
             }
         }
-        OutputFormat::Zsh | OutputFormat::ZshV2 => {
+        OutputFormat::Zsh | OutputFormat::ZshV2 | OutputFormat::ZshV3 => {
             let stdout = io::stdout();
             let mut output = stdout.lock();
+            if matches!(format, OutputFormat::ZshV3) {
+                output.write_all(if completion.enrichment_pending {
+                    b"true"
+                } else {
+                    b"false"
+                })?;
+                output.write_all(&[0])?;
+            }
             for candidate in completion.candidates {
                 let source = match candidate.source {
                     aster::protocol::CandidateSource::History => "history",
                     aster::protocol::CandidateSource::Command => "command",
+                    aster::protocol::CandidateSource::Filesystem => "filesystem",
+                    aster::protocol::CandidateSource::Help => "help",
                 };
                 let kind = match candidate.kind {
                     aster::protocol::CandidateKind::History => "history",
                     aster::protocol::CandidateKind::Command => "command",
+                    aster::protocol::CandidateKind::File => "file",
+                    aster::protocol::CandidateKind::Directory => "directory",
+                    aster::protocol::CandidateKind::Option => "option",
                 };
                 for field in [
                     candidate.insert_text.as_str(),
@@ -611,7 +625,7 @@ fn write_completion(response: Response, format: OutputFormat) -> Result<()> {
                     output.write_all(field.as_bytes())?;
                     output.write_all(&[0])?;
                 }
-                if matches!(format, OutputFormat::ZshV2) {
+                if matches!(format, OutputFormat::ZshV2 | OutputFormat::ZshV3) {
                     output.write_all(if candidate.description_pending {
                         b"true"
                     } else {
@@ -683,7 +697,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   typeset -g _ASTER_MENU_REQUEST_FD=-1
   typeset -g _ASTER_MENU_REQUEST_DIRTY=0
   typeset -g _ASTER_MENU_REFRESH_TICKS=0
-  typeset -g _ASTER_MENU_RESTORE_DISPLAY=""
+  typeset -g _ASTER_MENU_RESTORE_INDEX=1
   typeset -g _ASTER_RESTORE_HIGHLIGHTS=0
   typeset -g _ASTER_CAPTURE_FOREIGN_HIGHLIGHTS=0
   typeset -g _ASTER_MENU_TICK_FD=-1
@@ -795,6 +809,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
 
   _aster_preview_consider() {
     local display source target path command_name alias_command
+    local -a display_words
     if (( ${COLUMNS:-80} < 100 || ! _ASTER_MENU_ACTIVE )); then
       _aster_preview_clear
       return
@@ -812,15 +827,17 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       _ASTER_PREVIEW_COMMAND="${alias_command}${display#$command_name}"
     elif [[ "$command_name" == ls || "$command_name" == gls || "$command_name" == eza ]]; then
       _ASTER_PREVIEW_COMMAND="$display"
-    elif [[ "$source" == native ]]; then
-      path="${display##* }"
+    elif [[ "$source" == native || "$source" == filesystem ]]; then
+      display_words=("${(z)display}")
+      path="${(Q)display_words[-1]}"
       [[ -n "$path" ]] || return
+      [[ "$path" == "~/"* ]] && path="$HOME/${path#\~/}"
       _ASTER_PREVIEW_PATH="$path"
     fi
   }
 
   _aster_preview_ready() {
-    local fd="$1" line style
+    local fd="$1" line style response_target
     local styled=$(( ${#_ASTER_PREVIEW_COMMAND} > 0 ))
     local -a lines styles
     if (( fd != _ASTER_PREVIEW_FD )); then
@@ -829,6 +846,14 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       return 0
     fi
     zle -F "$fd"
+    if ! IFS= read -r -u "$fd" -d '' response_target ||
+       [[ "$response_target" != "$_ASTER_PREVIEW_TARGET" ]]; then
+      exec {fd}<&-
+      _ASTER_PREVIEW_FD=-1
+      _ASTER_PREVIEW_PID=-1
+      _ASTER_PREVIEW_TICKS=0
+      return 0
+    fi
     if (( styled )); then
       while IFS= read -r -u "$fd" -d '' line &&
             IFS= read -r -u "$fd" -d '' style; do
@@ -867,7 +892,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     _ASTER_MENU_REQUEST_CURSOR=0
     _ASTER_MENU_REQUEST_DIRTY=0
     _ASTER_MENU_REFRESH_TICKS=0
-    _ASTER_MENU_RESTORE_DISPLAY=""
+    _ASTER_MENU_RESTORE_INDEX=1
     _ASTER_NATIVE_REQUESTED=0
     _ASTER_NATIVE_START_TICKS=0
   }
@@ -942,6 +967,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     local horizontal="─" vertical="│" top_left="╭" top_right="╮"
     local bottom_left="╰" bottom_right="╯" separator="·" ellipsis="…"
     local selected_marker="▶ " history_icon="↺" command_icon="❯" native_icon="⇥"
+    local file_icon="·" directory_icon="▸" option_icon="-"
     if (( ! _ASTER_UTF8_UI )); then
       horizontal="-"
       vertical="|"
@@ -955,6 +981,9 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       history_icon="H"
       command_icon="$"
       native_icon="T"
+      file_icon="F"
+      directory_icon="D"
+      option_icon="O"
     fi
     local input="${BUFFER:-$_ASTER_MENU_REQUEST_BUFFER}"
     local virtual_query=""
@@ -996,6 +1025,9 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
           history) icon="$history_icon" ;;
           command) icon="$command_icon" ;;
           native) icon="$native_icon" ;;
+          file) icon="$file_icon" ;;
+          directory) icon="$directory_icon" ;;
+          option) icon="$option_icon" ;;
           *) icon="." ;;
         esac
         row="${selected_marker}${icon} ${compact_display}"
@@ -1077,6 +1109,9 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
         history) icon="$history_icon" ;;
         command) icon="$command_icon" ;;
         native) icon="$native_icon" ;;
+        file) icon="$file_icon" ;;
+        directory) icon="$directory_icon" ;;
+        option) icon="$option_icon" ;;
         *) icon="." ;;
       esac
       marker="  "
@@ -1226,10 +1261,20 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
 
   _aster_next_segment() {
     local value="$1" character
-    local index saw_non_whitespace=0
+    local index saw_non_whitespace=0 escaped=0
     REPLY="$value"
     for (( index = 1; index <= ${#value}; index++ )); do
       character="${value[$index]}"
+      if (( escaped )); then
+        escaped=0
+        saw_non_whitespace=1
+        continue
+      fi
+      if [[ "$character" == \\ ]]; then
+        escaped=1
+        saw_non_whitespace=1
+        continue
+      fi
       if [[ "$character" == [[:space:]] ]]; then
         if (( saw_non_whitespace )); then
           REPLY="${value[1,$index]}"
@@ -1250,6 +1295,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     local accept="${_ASTER_MENU_ACCEPTS[$_ASTER_MENU_INDEX]}"
     local display="${_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}"
     local source="${_ASTER_MENU_SOURCES[$_ASTER_MENU_INDEX]}"
+    local kind="${_ASTER_MENU_KINDS[$_ASTER_MENU_INDEX]}"
     (( CURSOR == ${#BUFFER} )) || return 1
     if (( _ASTER_FUZZY_ACTIVE )); then
       _aster_menu_clear
@@ -1265,18 +1311,36 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       accept="$REPLY"
     fi
     LBUFFER+="$accept"
-    if [[ "$source" == native && "$BUFFER" == "$display" &&
+    if [[ ( "$source" == native || "$kind" == file || "$kind" == option ) &&
+          "$BUFFER" == "$display" &&
           "${BUFFER[-1]}" != [/:=,[:space:]] ]]; then
       LBUFFER+=" "
     fi
     POSTDISPLAY=""
     if [[ "$mode" == segment ]]; then
+      _ASTER_MENU_INDEX=1
+      _ASTER_MENU_START=1
+      _ASTER_MENU_RESTORE_INDEX=1
       _aster_menu_refresh
     else
       _aster_menu_clear
       _ASTER_MENU_BUFFER="$BUFFER"
       _aster_menu_schedule
     fi
+  }
+
+  _aster_path_accept() {
+    local index found=0
+    for (( index = 1; index <= ${#_ASTER_MENU_ACCEPTS}; index++ )); do
+      [[ "${_ASTER_MENU_KINDS[$index]}" == file ||
+         "${_ASTER_MENU_KINDS[$index]}" == directory ]] || continue
+      (( found++ ))
+    done
+    if (( found == 1 )) && [[ "${_ASTER_MENU_DESCRIPTIONS[$_ASTER_MENU_INDEX]}" != *"(more matches)" ]]; then
+      _aster_menu_accept segment
+      return
+    fi
+    zle beep
   }
 
   _aster_call_native_completion() {
@@ -1290,9 +1354,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   }
 
   _aster_menu_refresh() {
-    local selected="$_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]"
     local previous_buffer="$_ASTER_MENU_BUFFER" delta="" accept
-    local index retained_index
+    local index retained_index=$_ASTER_MENU_INDEX
     local -a accepts displays descriptions kinds sources
     if (( _ASTER_MENU_ACTIVE )) && [[ "$BUFFER" == "$previous_buffer"* ]]; then
       delta="${BUFFER[${#previous_buffer}+1,-1]}"
@@ -1317,8 +1380,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       _ASTER_MENU_DESCRIPTIONS=("${descriptions[@]}")
       _ASTER_MENU_KINDS=("${kinds[@]}")
       _ASTER_MENU_SOURCES=("${sources[@]}")
-      retained_index=${_ASTER_MENU_DISPLAYS[(Ie)$selected]}
-      (( retained_index )) || retained_index=1
+      (( retained_index > ${#_ASTER_MENU_DISPLAYS} )) && retained_index=${#_ASTER_MENU_DISPLAYS}
+      (( retained_index < 1 )) && retained_index=1
       _ASTER_MENU_INDEX=$retained_index
       _ASTER_MENU_START=$retained_index
       _ASTER_MENU_BUFFER="$BUFFER"
@@ -1354,7 +1417,6 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   }
 
   _aster_menu_publish() {
-    local selected="${_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}"
     local index display
     local -a redraw_hooks apply_hooks
     local limit=$(( __ASTER_COMPLETION_MAX_CANDIDATES__ * 2 ))
@@ -1365,7 +1427,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     _ASTER_MENU_SOURCES=()
 
     for (( index = 1; index <= ${#_ASTER_DAEMON_ACCEPTS}; index++ )); do
-      [[ "${_ASTER_DAEMON_SOURCES[$index]}" == history ]] || continue
+      [[ "${_ASTER_DAEMON_SOURCES[$index]}" == filesystem ]] || continue
       display="${_ASTER_DAEMON_DISPLAYS[$index]}"
       [[ -n "$display" ]] && (( ! ${_ASTER_MENU_DISPLAYS[(Ie)$display]} )) || continue
       _ASTER_MENU_ACCEPTS+=("${_ASTER_DAEMON_ACCEPTS[$index]}")
@@ -1375,6 +1437,34 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       _ASTER_MENU_SOURCES+=("${_ASTER_DAEMON_SOURCES[$index]}")
       (( ${#_ASTER_MENU_ACCEPTS} >= limit )) && break
     done
+
+    if (( ${#_ASTER_MENU_ACCEPTS} < limit )); then
+      for (( index = 1; index <= ${#_ASTER_DAEMON_ACCEPTS}; index++ )); do
+        [[ "${_ASTER_DAEMON_SOURCES[$index]}" == history ]] || continue
+        display="${_ASTER_DAEMON_DISPLAYS[$index]}"
+        [[ -n "$display" ]] && (( ! ${_ASTER_MENU_DISPLAYS[(Ie)$display]} )) || continue
+        _ASTER_MENU_ACCEPTS+=("${_ASTER_DAEMON_ACCEPTS[$index]}")
+        _ASTER_MENU_DISPLAYS+=("$display")
+        _ASTER_MENU_DESCRIPTIONS+=("${_ASTER_DAEMON_DESCRIPTIONS[$index]}")
+        _ASTER_MENU_KINDS+=("${_ASTER_DAEMON_KINDS[$index]}")
+        _ASTER_MENU_SOURCES+=("${_ASTER_DAEMON_SOURCES[$index]}")
+        (( ${#_ASTER_MENU_ACCEPTS} >= limit )) && break
+      done
+    fi
+
+    if (( ${#_ASTER_MENU_ACCEPTS} < limit )); then
+      for (( index = 1; index <= ${#_ASTER_DAEMON_ACCEPTS}; index++ )); do
+        [[ "${_ASTER_DAEMON_SOURCES[$index]}" == help ]] || continue
+        display="${_ASTER_DAEMON_DISPLAYS[$index]}"
+        [[ -n "$display" ]] && (( ! ${_ASTER_MENU_DISPLAYS[(Ie)$display]} )) || continue
+        _ASTER_MENU_ACCEPTS+=("${_ASTER_DAEMON_ACCEPTS[$index]}")
+        _ASTER_MENU_DISPLAYS+=("$display")
+        _ASTER_MENU_DESCRIPTIONS+=("${_ASTER_DAEMON_DESCRIPTIONS[$index]}")
+        _ASTER_MENU_KINDS+=("${_ASTER_DAEMON_KINDS[$index]}")
+        _ASTER_MENU_SOURCES+=("${_ASTER_DAEMON_SOURCES[$index]}")
+        (( ${#_ASTER_MENU_ACCEPTS} >= limit )) && break
+      done
+    fi
 
     if (( ${#_ASTER_MENU_ACCEPTS} < limit )); then
       for (( index = 1; index <= ${#_ASTER_NATIVE_ACCEPTS}; index++ )); do
@@ -1391,7 +1481,9 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
 
     if (( ${#_ASTER_MENU_ACCEPTS} < limit )); then
       for (( index = 1; index <= ${#_ASTER_DAEMON_ACCEPTS}; index++ )); do
-        [[ "${_ASTER_DAEMON_SOURCES[$index]}" == history ]] && continue
+        [[ "${_ASTER_DAEMON_SOURCES[$index]}" == history ||
+           "${_ASTER_DAEMON_SOURCES[$index]}" == filesystem ||
+           "${_ASTER_DAEMON_SOURCES[$index]}" == help ]] && continue
         display="${_ASTER_DAEMON_DISPLAYS[$index]}"
         [[ -n "$display" ]] && (( ! ${_ASTER_MENU_DISPLAYS[(Ie)$display]} )) || continue
         _ASTER_MENU_ACCEPTS+=("${_ASTER_DAEMON_ACCEPTS[$index]}")
@@ -1403,7 +1495,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       done
     fi
 
-    _ASTER_MENU_RESTORE_DISPLAY="$selected"
+    _ASTER_MENU_RESTORE_INDEX=$_ASTER_MENU_INDEX
     zstyle -a zle-line-pre-redraw widgets redraw_hooks
     apply_hooks=( "${(@)redraw_hooks:#*:_zsh_highlight__zle-line-pre-redraw}" )
     if (( ${#apply_hooks} != ${#redraw_hooks} )); then
@@ -1420,7 +1512,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   }
 
   _aster_menu_request_ready() {
-    local fd="$1" accept display description kind source pending
+    local fd="$1" accept display description kind source pending response_pending
     local any_pending=0
     local -a accepts displays descriptions kinds sources
     if (( fd != _ASTER_MENU_REQUEST_FD )); then
@@ -1432,6 +1524,9 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     zle -F "$fd"
     BUFFER="$_ASTER_MENU_REQUEST_BUFFER"
     CURSOR=$_ASTER_MENU_REQUEST_CURSOR
+    if IFS= read -r -u "$fd" -d '' response_pending && [[ "$response_pending" == true ]]; then
+      any_pending=1
+    fi
     while IFS= read -r -u "$fd" -d '' accept &&
           IFS= read -r -u "$fd" -d '' display &&
           IFS= read -r -u "$fd" -d '' description &&
@@ -1603,17 +1698,10 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       return 0
     fi
     _ASTER_MENU_ACTIVE=1
-    _ASTER_MENU_INDEX=1
-    if [[ -n "$_ASTER_MENU_RESTORE_DISPLAY" ]]; then
-      local index
-      for (( index = 1; index <= ${#_ASTER_MENU_DISPLAYS}; index++ )); do
-        if [[ "${_ASTER_MENU_DISPLAYS[$index]}" == "$_ASTER_MENU_RESTORE_DISPLAY" ]]; then
-          _ASTER_MENU_INDEX=$index
-          break
-        fi
-      done
-    fi
-    _ASTER_MENU_RESTORE_DISPLAY=""
+    _ASTER_MENU_INDEX=$_ASTER_MENU_RESTORE_INDEX
+    (( _ASTER_MENU_INDEX > ${#_ASTER_MENU_DISPLAYS} )) && _ASTER_MENU_INDEX=${#_ASTER_MENU_DISPLAYS}
+    (( _ASTER_MENU_INDEX < 1 )) && _ASTER_MENU_INDEX=1
+    _ASTER_MENU_RESTORE_INDEX=1
     _ASTER_MENU_START=$_ASTER_MENU_INDEX
     _ASTER_MENU_BUFFER="$_ASTER_MENU_REQUEST_BUFFER"
     region_highlight=( "${_ASTER_FOREIGN_HIGHLIGHTS[@]}" )
@@ -1665,16 +1753,19 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     if [[ -n "$_ASTER_PREVIEW_PATH" || -n "$_ASTER_PREVIEW_COMMAND" ]]; then
       (( _ASTER_PREVIEW_TICKS++ ))
       if (( _ASTER_PREVIEW_FD < 0 && _ASTER_PREVIEW_TICKS >= 2 )); then
-        local preview_fd
-        if [[ -n "$_ASTER_PREVIEW_COMMAND" ]]; then
-          exec {preview_fd}< <(command aster preview-command \
-            --line "$_ASTER_PREVIEW_COMMAND" \
-            --cwd "$PWD" 2>/dev/null)
-        else
-          exec {preview_fd}< <(command aster preview-file \
-            --path "$_ASTER_PREVIEW_PATH" \
-            --cwd "$PWD" 2>/dev/null)
-        fi
+        local preview_fd preview_target="$_ASTER_PREVIEW_TARGET"
+        exec {preview_fd}< <(
+          print -rn -- "$preview_target"$'\0'
+          if [[ -n "$_ASTER_PREVIEW_COMMAND" ]]; then
+            command aster preview-command \
+              --line "$_ASTER_PREVIEW_COMMAND" \
+              --cwd "$PWD" 2>/dev/null
+          else
+            command aster preview-file \
+              --path "$_ASTER_PREVIEW_PATH" \
+              --cwd "$PWD" 2>/dev/null
+          fi
+        )
         _ASTER_PREVIEW_FD="$preview_fd"
         _ASTER_PREVIEW_PID=$!
         _ASTER_PREVIEW_TICKS=0
@@ -1723,19 +1814,24 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       exec {query_fd}< <(command aster fuzzy \
         --query "$_ASTER_FUZZY_QUERY" \
         --cwd "$cwd" \
-        --format zsh-v2 2>/dev/null)
+        --format zsh-v3 2>/dev/null)
     else
       exec {query_fd}< <(print -rn -- "$buffer" | command aster complete \
         --stdin \
         --cursor "$cursor" \
         --cwd "$cwd" \
-        --format zsh-v2 2>/dev/null)
+        --format zsh-v3 2>/dev/null)
     fi
     _ASTER_MENU_REQUEST_FD="$query_fd"
     zle -F "$query_fd" _aster_menu_request_ready
   }
 
   _aster_menu_line_init() {
+    _ASTER_FUZZY_ACTIVE=0
+    _ASTER_FUZZY_BASE=""
+    _ASTER_FUZZY_QUERY=""
+    POSTDISPLAY=""
+    _ASTER_MENU_BUFFER="$BUFFER"
     _aster_menu_start_ticker
   }
 
@@ -1794,6 +1890,10 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   _aster_interrupt() {
     _aster_menu_clear
     POSTDISPLAY=""
+    _ASTER_FUZZY_ACTIVE=0
+    _ASTER_FUZZY_BASE=""
+    _ASTER_FUZZY_QUERY=""
+    _ASTER_MENU_REQUEST_BUFFER=""
     zle _aster-native-interrupt
   }
 
@@ -1807,6 +1907,11 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       return
     fi
     if (( _ASTER_MENU_ACTIVE && CURSOR == ${#BUFFER} )); then
+      if [[ "${_ASTER_MENU_KINDS[$_ASTER_MENU_INDEX]}" == file ||
+            "${_ASTER_MENU_KINDS[$_ASTER_MENU_INDEX]}" == directory ]]; then
+        _aster_path_accept
+        return
+      fi
       _aster_menu_accept segment
       return
     fi
@@ -1814,13 +1919,13 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     POSTDISPLAY=""
     _aster_call_native_completion _aster-native-tab
     _ASTER_MENU_BUFFER="$BUFFER"
-    [[ -n "$BUFFER" ]] && (( CURSOR == ${#BUFFER} )) && _aster_menu_schedule
   }
 
   _aster_shift_tab() {
     if (( _ASTER_MENU_ACTIVE )); then
       (( _ASTER_MENU_INDEX > 1 )) && (( _ASTER_MENU_INDEX-- ))
       _aster_menu_render
+      zle -R
       return
     fi
     if (( _ASTER_FUZZY_ACTIVE )); then
@@ -1831,7 +1936,6 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     POSTDISPLAY=""
     _aster_call_native_completion _aster-native-shift-tab
     _ASTER_MENU_BUFFER="$BUFFER"
-    [[ -n "$BUFFER" ]] && (( CURSOR == ${#BUFFER} )) && _aster_menu_schedule
   }
 
   _aster_complete() {
@@ -1853,6 +1957,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     if (( _ASTER_MENU_ACTIVE )); then
       (( _ASTER_MENU_INDEX < ${#_ASTER_MENU_ACCEPTS} )) && (( _ASTER_MENU_INDEX++ ))
       _aster_menu_render
+      zle -R
     elif (( _ASTER_FUZZY_ACTIVE )); then
       zle beep
     else
@@ -1865,6 +1970,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     if (( _ASTER_MENU_ACTIVE )); then
       (( _ASTER_MENU_INDEX > 1 )) && (( _ASTER_MENU_INDEX-- ))
       _aster_menu_render
+      zle -R
     elif (( _ASTER_FUZZY_ACTIVE )); then
       zle beep
     else
@@ -2139,12 +2245,14 @@ mod tests {
         assert!(integration.contains("bindkey '^@' aster-complete"));
         assert!(integration.contains("Ctrl-Space full"));
         assert!(integration.contains("bindkey '^[[Z' aster-shift-tab"));
-        assert!(integration.contains("--format zsh-v2"));
+        assert!(integration.contains("--format zsh-v3"));
         assert!(integration.contains("_ASTER_MENU_REFRESH_TICKS=5"));
         assert!(integration.contains("zle -C aster-native-capture"));
         assert!(integration.contains("descriptions+=(\"Zsh completion\")"));
         assert!(integration.contains("${(@)region_highlight:#*memo=aster*}"));
         assert!(integration.contains("_ASTER_FOREIGN_HIGHLIGHTS"));
+        assert!(integration.contains("_ASTER_MENU_RESTORE_INDEX"));
+        assert!(!integration.contains("_ASTER_MENU_RESTORE_DISPLAY"));
         assert!(!integration.contains("select-pane"));
         assert!(!integration.contains("ASTER_TMUX_SHELL_TITLE"));
         assert!(!integration.contains("aster-menu-enter"));

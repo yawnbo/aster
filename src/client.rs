@@ -7,11 +7,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use fs2::FileExt;
 
 use crate::config::Paths;
 use crate::protocol::{PROTOCOL_VERSION, Request, RequestEnvelope, Response};
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
@@ -75,15 +76,41 @@ fn request_once_version(paths: &Paths, request: Request, version: u32) -> Result
 }
 
 fn replace_previous_daemon(paths: &Paths) -> Result<()> {
-    if PROTOCOL_VERSION > 0 {
-        let _ = request_once_version(paths, Request::Shutdown, PROTOCOL_VERSION - 1);
+    for version in (0..PROTOCOL_VERSION).rev() {
+        if matches!(
+            request_once_version(paths, Request::Shutdown, version),
+            Ok(Response::ShuttingDown)
+        ) {
+            break;
+        }
     }
-    let deadline = Instant::now() + CONNECT_TIMEOUT;
-    while Instant::now() < deadline && UnixStream::connect(&paths.socket_file).is_ok() {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let socket_closed = UnixStream::connect(&paths.socket_file).is_err();
+        if socket_closed && daemon_lock_is_available(paths) {
+            start_daemon(paths)?;
+            return wait_for_daemon(paths);
+        }
         thread::sleep(Duration::from_millis(20));
     }
-    start_daemon(paths)?;
-    wait_for_daemon(paths)
+    bail!("previous Aster daemon did not release its socket and lock")
+}
+
+fn daemon_lock_is_available(paths: &Paths) -> bool {
+    let Ok(file) = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&paths.daemon_lock_file)
+    else {
+        return false;
+    };
+    if file.try_lock_exclusive().is_err() {
+        return false;
+    }
+    let _ = FileExt::unlock(&file);
+    true
 }
 
 fn start_daemon(paths: &Paths) -> Result<()> {
