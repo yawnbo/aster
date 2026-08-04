@@ -100,15 +100,16 @@ The integration snapshots native widgets only on first load, but reinstalls its
 functions, hooks, and bindings on every evaluation so sourcing `.zshrc` remains
 safe after `compinit` or other ZLE plugins recreate their wrappers.
 
-Two consecutive spaces enter an explicit fuzzy mode. The second space is
-consumed, the first is retained as the fuzzy base, and query text is mirrored
-into `BUFFER` so ZLE keeps its real cursor after the query. `POSTDISPLAY` shows
+Two consecutive spaces enter an explicit fuzzy mode and both trigger spaces are
+removed before saving the fuzzy base. Query text is mirrored into `BUFFER` so
+ZLE keeps its real cursor after the query. `POSTDISPLAY` shows
 the selected fuzzy result as ghost text and changes immediately with menu
 navigation. Each query update asynchronously asks the daemon for a bounded
 history and command inventory ranked by `fzf --filter`. Escape restores the
-saved base and cancels the request. Ctrl-C clears fuzzy base/query state before
-delegating to the shell interrupt, and `line-init` resets that state again for
-every new prompt.
+saved base and cancels the request. Enter accepts the selected candidate and
+delegates to the original command-submission widget. Ctrl-C clears fuzzy
+base/query state before delegating to the shell interrupt, and `line-init` resets
+that state again for every new prompt.
 
 Aster memo-tags only its own highlight regions. It preserves foreign regions
 across asynchronous FD callbacks and restores an immutable in-flight buffer

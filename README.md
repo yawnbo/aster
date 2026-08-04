@@ -58,9 +58,10 @@ The integration:
   open suggestion, Tab delegates to the previous Zsh widget.
 - Uses Shift-Tab to move upward through suggestions without entering a modal
   editing state; letters and Backspace continue editing normally.
-- Consumes a second consecutive Space to enter inline fuzzy mode over shared
+- Consumes both consecutive trigger spaces to enter inline fuzzy mode over shared
   history and installed commands. Escape restores only the current command's
-  base buffer; Ctrl-C and each new prompt discard all fuzzy state.
+  space-free base buffer; Enter executes the selected result, while Ctrl-C and
+  each new prompt discard all fuzzy state.
 - Captures append-safe candidates from the configured Zsh completion system in
   a forked completion context after about 30-60 ms idle and blends them into
   Aster's menu without blocking input.

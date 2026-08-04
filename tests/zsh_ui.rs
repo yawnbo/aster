@@ -30,6 +30,8 @@ fn popup_preserves_highlights_and_shell_bindings() {
     let socket = state.join("aster.sock");
     let state_dump = temporary.path().join("zle-state");
     let sync_file = temporary.path().join("zle-sync");
+    let escape_request = temporary.path().join("zle-escape");
+    let fuzzy_execute_file = temporary.path().join("fuzzy-executed");
     let preview_file = temporary.path().join("preview-target.txt");
     let preview_file_two = temporary.path().join("preview-target.zzz.txt");
     fs::write(&preview_file, "preview-first-line\npreview-second-line\n").unwrap();
@@ -112,6 +114,10 @@ compdef _aster_test_long aster-command-with-a-very-long-name
 alias ls=eza
 eval "$({aster} init zsh)"
 _aster_test_dump_state() {{
+  if [[ -e {escape_request} ]]; then
+    command rm -f -- {escape_request}
+    _aster_escape
+  fi
   print -r -- "$_ASTER_MENU_ACTIVE|${{#_ASTER_MENU_ACCEPTS}}|$_ASTER_MENU_BUFFER|$BUFFER|${{_ASTER_MENU_ACCEPTS[1]}}|$_ASTER_MENU_INDEX|${{_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}}|$_ASTER_FUZZY_ACTIVE|$_ASTER_FUZZY_BASE|$_ASTER_FUZZY_QUERY|$_ASTER_PREVIEW_FD|$_ASTER_PREVIEW_TICKS|$_ASTER_PREVIEW_PATH|${{(j:;:)_ASTER_PREVIEW_LINES}}|${{(j:;:)_ASTER_MENU_DISPLAYS}}|${{POSTDISPLAY%%$'\n'*}}|${{(j:;:)_ASTER_MENU_SOURCES}}" > {state_dump}
 }}
 _aster_test_sync() {{
@@ -130,7 +136,8 @@ PROMPT='%# '
         preview_file = shell_quote(preview_file.to_str().unwrap()),
         preview_file_two = shell_quote(preview_file_two.to_str().unwrap()),
         state_dump = shell_quote(state_dump.to_str().unwrap()),
-        sync_file = shell_quote(sync_file.to_str().unwrap())
+        sync_file = shell_quote(sync_file.to_str().unwrap()),
+        escape_request = shell_quote(escape_request.to_str().unwrap())
     );
     fs::write(zdotdir.join(".zshrc"), zshrc).unwrap();
     let shell_environment = format!(
@@ -837,6 +844,28 @@ PROMPT='%# '
             .unwrap();
         assert!(status.success(), "failed to seed fuzzy history");
     }
+    let fuzzy_execute_command = format!(
+        "print -r -- fuzzy-enter-executed > {}",
+        shell_quote(fuzzy_execute_file.to_str().unwrap())
+    );
+    let status = Command::new(aster)
+        .args([
+            "record",
+            "--command",
+            &fuzzy_execute_command,
+            "--cwd",
+            temporary.path().to_str().unwrap(),
+            "--exit-code",
+            "0",
+            "--session",
+            "fuzzy-execute-test",
+        ])
+        .env("ASTER_CONFIG", &config)
+        .env("ASTER_STATE_DIR", &state)
+        .env("ASTER_SOCKET", &socket)
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to seed fuzzy execution history");
     let ls_history = format!("ls {}", temporary.path().display());
     let status = Command::new(aster)
         .args([
@@ -881,9 +910,9 @@ PROMPT='%# '
     dump_zle_state(&server);
     let fuzzy_state = fs::read_to_string(&state_dump).unwrap();
     let fuzzy_fields: Vec<_> = fuzzy_state.trim_end().split('|').collect();
-    assert_eq!(fuzzy_fields[3], " fzht");
+    assert_eq!(fuzzy_fields[3], "fzht");
     assert_eq!(fuzzy_fields[7], "1");
-    assert_eq!(fuzzy_fields[8], " ");
+    assert_eq!(fuzzy_fields[8], "");
     assert_eq!(fuzzy_fields[9], "fzht");
     assert_eq!(
         fuzzy_fields[15],
@@ -892,7 +921,7 @@ PROMPT='%# '
     );
     assert_eq!(
         cursor_x(&server, "test:0.0"),
-        7,
+        6,
         "fuzzy query did not retain ZLE's real cursor"
     );
     assert!(
@@ -907,25 +936,26 @@ PROMPT='%# '
     let scrolled_fuzzy_state = fs::read_to_string(&state_dump).unwrap();
     let scrolled_fuzzy_fields: Vec<_> = scrolled_fuzzy_state.trim_end().split('|').collect();
     assert_ne!(scrolled_fuzzy_fields[6], fuzzy_fields[6]);
+    assert_eq!(scrolled_fuzzy_fields[8], "");
     assert_eq!(
         scrolled_fuzzy_fields[15],
         format!("  → {}", scrolled_fuzzy_fields[6]),
         "scrolling did not update fuzzy ghost text"
     );
 
-    Command::new("tmux")
-        .args(["-L", &server, "send-keys", "-t", "test:0.0", "Escape"])
-        .status()
-        .unwrap();
+    fs::write(&escape_request, "").unwrap();
     dump_zle_state(&server);
     let escaped_state = fs::read_to_string(&state_dump).unwrap();
     let escaped_fields: Vec<_> = escaped_state.trim_end().split('|').collect();
-    assert_eq!(escaped_fields[3], " ");
+    assert_eq!(
+        escaped_fields[3], "",
+        "fuzzy escape state: {escaped_state:?}"
+    );
     assert_eq!(escaped_fields[7], "0");
     assert_eq!(escaped_fields[9], "");
 
     Command::new("tmux")
-        .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0", " fzht"])
+        .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0", "  fzht"])
         .status()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(4);
@@ -960,6 +990,34 @@ PROMPT='%# '
             "-l",
             "-t",
             "test:0.0",
+            "  fuzzy-enter-executed",
+        ])
+        .status()
+        .unwrap();
+    wait_for_pane(&server, "Enter run");
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "Enter"])
+        .status()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < deadline && !fuzzy_execute_file.exists() {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        fs::read_to_string(&fuzzy_execute_file).unwrap(),
+        "fuzzy-enter-executed\n",
+        "fuzzy Enter selected the command without executing it"
+    );
+    wait_for_zle(&server, &sync_file);
+
+    Command::new("tmux")
+        .args([
+            "-L",
+            &server,
+            "send-keys",
+            "-l",
+            "-t",
+            "test:0.0",
             "echo first  stale",
         ])
         .status()
@@ -968,7 +1026,7 @@ PROMPT='%# '
     let first_interrupted_fuzzy = fs::read_to_string(&state_dump).unwrap();
     let first_interrupted_fields: Vec<_> = first_interrupted_fuzzy.trim_end().split('|').collect();
     assert_eq!(first_interrupted_fields[7], "1");
-    assert_eq!(first_interrupted_fields[8], "echo first ");
+    assert_eq!(first_interrupted_fields[8], "echo first");
     assert_eq!(first_interrupted_fields[9], "stale");
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
@@ -992,16 +1050,13 @@ PROMPT='%# '
     let second_fuzzy = fs::read_to_string(&state_dump).unwrap();
     let second_fuzzy_fields: Vec<_> = second_fuzzy.trim_end().split('|').collect();
     assert_eq!(second_fuzzy_fields[7], "1");
-    assert_eq!(second_fuzzy_fields[8], "echo second ");
+    assert_eq!(second_fuzzy_fields[8], "echo second");
     assert_eq!(second_fuzzy_fields[9], "fresh");
-    Command::new("tmux")
-        .args(["-L", &server, "send-keys", "-t", "test:0.0", "Escape"])
-        .status()
-        .unwrap();
+    fs::write(&escape_request, "").unwrap();
     dump_zle_state(&server);
     let escaped_second_fuzzy = fs::read_to_string(&state_dump).unwrap();
     let escaped_second_fields: Vec<_> = escaped_second_fuzzy.trim_end().split('|').collect();
-    assert_eq!(escaped_second_fields[3], "echo second ");
+    assert_eq!(escaped_second_fields[3], "echo second");
     assert_eq!(escaped_second_fields[7], "0");
     assert_eq!(escaped_second_fields[8], "");
     assert_eq!(escaped_second_fields[9], "");

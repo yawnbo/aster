@@ -1104,7 +1104,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     top="${top_prefix}${fill}${count}${top_right}"
     local footer=" S-Tab/K up ${separator} C-N down ${separator} Tab part ${separator} __ASTER_COMPLETION_KEY_LABEL__ full "
     (( _ASTER_FUZZY_ACTIVE )) && \
-      footer=" Esc exit ${separator} C-K up ${separator} C-N down ${separator} Tab choose "
+      footer=" Esc exit ${separator} C-K up ${separator} C-N down ${separator} Tab choose ${separator} Enter run "
     local bottom_prefix="${bottom_left}${horizontal}${footer}"
     printf -v fill '%*s' "$(( box_width - ${#bottom_prefix} - 1 ))" ""
     fill="${fill// /$horizontal}"
@@ -1992,6 +1992,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       return
     fi
     if [[ "$LBUFFER" == *" " ]] && (( CURSOR == ${#BUFFER} )); then
+      LBUFFER="${LBUFFER% }"
       _aster_fuzzy_start
       return
     fi
@@ -2091,6 +2092,15 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       (( _ASTER_MENU_ACTIVE )) && _aster_menu_clear 1
       _aster_call_native_completion _aster-native-trigger
     fi
+  }
+
+  _aster_fuzzy_execute() {
+    if (( ! _ASTER_FUZZY_ACTIVE || ! _ASTER_MENU_ACTIVE )); then
+      zle beep
+      return
+    fi
+    _aster_menu_accept || return
+    zle _aster-native-enter
   }
 
   _aster_menu_down() {
@@ -2215,6 +2225,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     typeset -g _ASTER_PREVIOUS_UP="${$(bindkey '^K')##* }"
     typeset -g _ASTER_PREVIOUS_SHIFT_TAB="${$(bindkey '^[[Z')##* }"
     typeset -g _ASTER_PREVIOUS_ESCAPE="${$(bindkey '^[')##* }"
+    typeset -g _ASTER_PREVIOUS_ENTER="${$(bindkey '^M')##* }"
     typeset -g _ASTER_PREVIOUS_HISTORY_UP="${$(bindkey '^[[A')##* }"
     typeset -g _ASTER_PREVIOUS_HISTORY_UP_APPLICATION="${$(bindkey '^[OA')##* }"
     typeset -g _ASTER_PREVIOUS_HISTORY_DOWN="${$(bindkey '^[[B')##* }"
@@ -2226,6 +2237,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     [[ -z "$_ASTER_PREVIOUS_SHIFT_TAB" || "$_ASTER_PREVIOUS_SHIFT_TAB" == "undefined-key" ]] && \
       _ASTER_PREVIOUS_SHIFT_TAB=reverse-menu-complete
     [[ -z "$_ASTER_PREVIOUS_ESCAPE" ]] && _ASTER_PREVIOUS_ESCAPE=undefined-key
+    [[ -z "$_ASTER_PREVIOUS_ENTER" || "$_ASTER_PREVIOUS_ENTER" == "undefined-key" ]] && \
+      _ASTER_PREVIOUS_ENTER=accept-line
     [[ -z "$_ASTER_PREVIOUS_HISTORY_UP" || "$_ASTER_PREVIOUS_HISTORY_UP" == "undefined-key" ]] && \
       _ASTER_PREVIOUS_HISTORY_UP=up-line-or-history
     [[ -z "$_ASTER_PREVIOUS_HISTORY_UP_APPLICATION" ||
@@ -2241,6 +2254,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     zle -A "$_ASTER_PREVIOUS_UP" _aster-native-up
     zle -A "$_ASTER_PREVIOUS_SHIFT_TAB" _aster-native-shift-tab
     zle -A "$_ASTER_PREVIOUS_ESCAPE" _aster-native-escape
+    zle -A "$_ASTER_PREVIOUS_ENTER" _aster-native-enter
     zle -A "$_ASTER_PREVIOUS_HISTORY_UP" _aster-native-history-up
     zle -A "$_ASTER_PREVIOUS_HISTORY_UP_APPLICATION" _aster-native-history-up-application
     zle -A "$_ASTER_PREVIOUS_HISTORY_DOWN" _aster-native-history-down
@@ -2292,9 +2306,17 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     fi
     zle -A "$_ASTER_PREVIOUS_INTERRUPT" _aster-native-interrupt
   fi
+  if [[ -z "${widgets[_aster-native-enter]:-}" ]]; then
+    typeset -g _ASTER_PREVIOUS_ENTER="${$(bindkey '^M')##* }"
+    [[ -z "$_ASTER_PREVIOUS_ENTER" || "$_ASTER_PREVIOUS_ENTER" == "undefined-key" ||
+          "$_ASTER_PREVIOUS_ENTER" == aster-fuzzy-execute ]] && \
+      _ASTER_PREVIOUS_ENTER=accept-line
+    zle -A "$_ASTER_PREVIOUS_ENTER" _aster-native-enter
+  fi
   zle -N aster-tab _aster_tab
   bindkey '^I' aster-tab
   zle -N aster-complete _aster_complete
+  zle -N aster-fuzzy-execute _aster_fuzzy_execute
   zle -N aster-menu-down _aster_menu_down
   zle -N aster-menu-up _aster_menu_up
   zle -N aster-shift-tab _aster_shift_tab
@@ -2336,7 +2358,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   bindkey -M aster-fuzzy '^[[B' aster-menu-down
   bindkey -M aster-fuzzy '^[OB' aster-menu-down
   bindkey -M aster-fuzzy '__ASTER_COMPLETION_KEY__' aster-complete
-  bindkey -M aster-fuzzy '^M' aster-complete
+  bindkey -M aster-fuzzy '^M' aster-fuzzy-execute
   bindkey -M aster-fuzzy '^C' aster-interrupt
   bindkey -M aster-fuzzy '^[' aster-escape
 
@@ -2451,7 +2473,8 @@ mod tests {
         assert!(!integration.contains("select-pane"));
         assert!(!integration.contains("ASTER_TMUX_SHELL_TITLE"));
         assert!(!integration.contains("aster-menu-enter"));
-        assert!(!integration.contains("bindkey '^M'"));
+        assert!(!integration.contains("bindkey '^M' aster"));
+        assert!(integration.contains("bindkey -M aster-fuzzy '^M' aster-fuzzy-execute"));
         assert!(!integration.contains("__ASTER_COMPLETION_KEY__"));
         assert!(!integration.contains("__ASTER_UI_"));
 
