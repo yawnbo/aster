@@ -190,7 +190,7 @@ accept = "full"
 # Match common shell history privacy behavior.
 ignore_leading_space = true
 
-# Prefer commands known to have completed successfully.
+# Prefer successful commands when recency is tied.
 successful_first = true
 
 [ui]

@@ -20,7 +20,7 @@
 - Parse common GNU, rendered man, Clap, Cobra, Click, and argparse flag layouts
   for root-command option candidates.
 - Extend the cache key with subcommand paths.
-- Add subcommands and documented enum values.
+- Add root subcommands and documented enum values.
 
 ## Phase 3: Interactive UI
 

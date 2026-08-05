@@ -98,10 +98,38 @@ pub fn complete(
     }
 
     let mut enrichment_pending = false;
-    if let Some((command, prefix)) = option_context(buffer) {
+    let help_candidates = if let Some((command, option, prefix)) = value_context(buffer) {
+        let values = commands.matching_values(command, option, prefix, limit);
+        enrichment_pending = values.pending;
+        values
+            .entries
+            .into_iter()
+            .filter_map(|value| {
+                let suffix = value.value.strip_prefix(prefix)?;
+                let insertion = if suffix.is_empty() { " " } else { suffix };
+                Some(Candidate {
+                    display: if suffix.is_empty() {
+                        buffer.to_owned()
+                    } else {
+                        format!("{buffer}{suffix}")
+                    },
+                    description: if value.description.is_empty() {
+                        format!("Value for {option}")
+                    } else {
+                        value.description
+                    },
+                    description_pending: false,
+                    kind: CandidateKind::Value,
+                    insert_text: insertion.to_owned(),
+                    accept_text: insertion.to_owned(),
+                    source: CandidateSource::Help,
+                })
+            })
+            .collect()
+    } else if let Some((command, prefix)) = option_context(buffer) {
         let options = commands.matching_options(command, prefix, limit);
         enrichment_pending = options.pending;
-        let option_candidates: Vec<_> = options
+        options
             .entries
             .into_iter()
             .filter_map(|option| {
@@ -119,12 +147,46 @@ pub fn complete(
                     source: CandidateSource::Help,
                 })
             })
+            .collect()
+    } else if let Some((command, prefix)) = subcommand_context(buffer) {
+        let subcommands = commands.matching_subcommands(command, prefix, limit);
+        enrichment_pending = subcommands.pending;
+        subcommands
+            .entries
+            .into_iter()
+            .filter_map(|subcommand| {
+                let suffix = subcommand.name.strip_prefix(prefix)?;
+                let insertion = if suffix.is_empty() { " " } else { suffix };
+                Some(Candidate {
+                    display: if suffix.is_empty() {
+                        buffer.to_owned()
+                    } else {
+                        format!("{buffer}{suffix}")
+                    },
+                    description: subcommand.description,
+                    description_pending: false,
+                    kind: CandidateKind::Subcommand,
+                    insert_text: insertion.to_owned(),
+                    accept_text: insertion.to_owned(),
+                    source: CandidateSource::Help,
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if !help_candidates.is_empty() {
+        let mut help_candidates: Vec<_> = help_candidates
+            .into_iter()
+            .filter(|entry| {
+                !candidates
+                    .iter()
+                    .any(|candidate| candidate.display == entry.display)
+            })
             .collect();
-        if !option_candidates.is_empty() {
-            let option_slots = option_candidates.len().min((limit / 2).max(1));
-            candidates.truncate(limit.saturating_sub(option_slots));
-            candidates.extend(option_candidates.into_iter().take(option_slots));
-        }
+        let help_slots = help_candidates.len().min((limit / 2).max(1));
+        candidates.truncate(limit.saturating_sub(help_slots));
+        candidates.extend(help_candidates.drain(..help_slots));
     }
 
     Ok(CompletionResponse {
@@ -406,10 +468,7 @@ fn escape_path_suffix(value: &str) -> String {
 }
 
 fn option_context(buffer: &str) -> Option<(&str, &str)> {
-    if buffer
-        .chars()
-        .any(|character| character.is_control() || "'\"\\;&|><$`(){}[]!*?".contains(character))
-    {
+    if !safe_structured_buffer(buffer) {
         return None;
     }
     let argument_start = buffer.rfind(char::is_whitespace)? + 1;
@@ -423,6 +482,72 @@ fn option_context(buffer: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((command, prefix))
+}
+
+fn subcommand_context(buffer: &str) -> Option<(&str, &str)> {
+    if !safe_structured_buffer(buffer) {
+        return None;
+    }
+    let argument_start = buffer.rfind(char::is_whitespace)? + 1;
+    let prefix = &buffer[argument_start..];
+    if prefix.starts_with('-') || !valid_structured_prefix(prefix) {
+        return None;
+    }
+    let mut words = buffer[..argument_start].split_ascii_whitespace();
+    let command = words.next()?;
+    if !valid_command_prefix(command) || words.next().is_some() {
+        return None;
+    }
+    Some((command, prefix))
+}
+
+fn value_context(buffer: &str) -> Option<(&str, &str, &str)> {
+    if !safe_structured_buffer(buffer) {
+        return None;
+    }
+    let argument_start = buffer.rfind(char::is_whitespace)? + 1;
+    let token = &buffer[argument_start..];
+    let mut words = buffer[..argument_start].split_ascii_whitespace();
+    let command = words.next()?;
+    if !valid_command_prefix(command) {
+        return None;
+    }
+
+    if let Some((option, prefix)) = token.split_once('=') {
+        if words.next().is_none() && valid_option_context_spelling(option) {
+            return Some((command, option, prefix));
+        }
+        return None;
+    }
+
+    let option = words.next()?;
+    if words.next().is_some() || token.starts_with('-') || !valid_option_context_spelling(option) {
+        return None;
+    }
+    Some((command, option, token))
+}
+
+fn safe_structured_buffer(buffer: &str) -> bool {
+    buffer.is_ascii()
+        && !buffer
+            .chars()
+            .any(|character| character.is_control() || "'\"\\;&|><$`(){}[]!*?".contains(character))
+}
+
+fn valid_structured_prefix(prefix: &str) -> bool {
+    prefix.is_empty()
+        || (prefix.as_bytes()[0].is_ascii_alphanumeric()
+            && prefix.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'+')
+            }))
+}
+
+fn valid_option_context_spelling(option: &str) -> bool {
+    option != "--"
+        && option.starts_with('-')
+        && option
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn fzf_indexes(candidates: &[Candidate], query: &str, limit: usize) -> Result<Vec<usize>> {
@@ -577,7 +702,7 @@ pub fn next_segment(suffix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::{CommandCatalog, CommandEntry, OptionMatch};
+    use crate::commands::{CommandCatalog, CommandEntry, OptionMatch, SubcommandMatch, ValueMatch};
     use crate::config::Settings;
     use crate::store::Store;
     use tempfile::tempdir;
@@ -809,6 +934,100 @@ mod tests {
         assert_eq!(completion.candidates[0].kind, CandidateKind::Option);
         assert_eq!(completion.candidates[0].source, CandidateSource::Help);
         assert_eq!(completion.candidates[1].display, "tool --version");
+    }
+
+    #[test]
+    fn completes_cached_subcommands_and_documented_values() {
+        let store = Store::in_memory().unwrap();
+        let commands = CommandCatalog::from_structured(
+            "tool",
+            Vec::new(),
+            vec![
+                SubcommandMatch {
+                    name: "build".to_owned(),
+                    description: "Build the project".to_owned(),
+                },
+                SubcommandMatch {
+                    name: "inspect".to_owned(),
+                    description: "Inspect project state".to_owned(),
+                },
+            ],
+            vec![(
+                "--color".to_owned(),
+                vec![
+                    ValueMatch {
+                        value: "auto".to_owned(),
+                        description: String::new(),
+                    },
+                    ValueMatch {
+                        value: "always".to_owned(),
+                        description: "Always use color".to_owned(),
+                    },
+                ],
+            )],
+        );
+
+        let completion = complete(
+            &store,
+            &commands,
+            "tool bu",
+            "tool bu".len(),
+            "/repo",
+            None,
+            &Settings::default(),
+        )
+        .unwrap();
+        assert_eq!(completion.candidates.len(), 1);
+        assert_eq!(completion.candidates[0].display, "tool build");
+        assert_eq!(completion.candidates[0].insert_text, "ild");
+        assert_eq!(completion.candidates[0].kind, CandidateKind::Subcommand);
+
+        let completion = complete(
+            &store,
+            &commands,
+            "tool --color=a",
+            "tool --color=a".len(),
+            "/repo",
+            None,
+            &Settings::default(),
+        )
+        .unwrap();
+        assert_eq!(completion.candidates.len(), 2);
+        assert_eq!(completion.candidates[0].display, "tool --color=auto");
+        assert_eq!(completion.candidates[0].description, "Value for --color");
+        assert_eq!(completion.candidates[0].kind, CandidateKind::Value);
+        assert_eq!(completion.candidates[1].display, "tool --color=always");
+        assert_eq!(completion.candidates[1].description, "Always use color");
+
+        let completion = complete(
+            &store,
+            &commands,
+            "tool --color auto",
+            "tool --color auto".len(),
+            "/repo",
+            None,
+            &Settings::default(),
+        )
+        .unwrap();
+        assert_eq!(completion.candidates[0].display, "tool --color auto");
+        assert_eq!(completion.candidates[0].insert_text, " ");
+    }
+
+    #[test]
+    fn recognizes_only_unambiguous_structured_contexts() {
+        assert_eq!(subcommand_context("tool bu"), Some(("tool", "bu")));
+        assert_eq!(subcommand_context("tool "), Some(("tool", "")));
+        assert_eq!(subcommand_context("tool other bu"), None);
+        assert_eq!(subcommand_context("tool --flag "), None);
+        assert_eq!(
+            value_context("tool --color=a"),
+            Some(("tool", "--color", "a"))
+        );
+        assert_eq!(
+            value_context("tool --color a"),
+            Some(("tool", "--color", "a"))
+        );
+        assert_eq!(value_context("tool other --color a"), None);
     }
 
     #[test]

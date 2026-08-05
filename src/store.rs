@@ -127,11 +127,11 @@ impl Store {
                 COUNT(*) AS uses
              FROM command_events
              WHERE command LIKE ?1 ESCAPE '\\' AND command <> ?3
-             GROUP BY command
-             ORDER BY
+              GROUP BY command
+              ORDER BY
+                latest DESC,
                 same_cwd DESC,
                 CASE WHEN ?5 = 1 AND successes > 0 THEN 1 ELSE 0 END DESC,
-                latest DESC,
                 uses DESC,
                 command ASC
              LIMIT ?4",
@@ -165,11 +165,11 @@ impl Store {
                 MAX(observed_at_ms) AS latest,
                 COUNT(*) AS uses
              FROM command_events
-             GROUP BY command
-             ORDER BY
+              GROUP BY command
+              ORDER BY
+                latest DESC,
                 same_cwd DESC,
                 CASE WHEN ?3 = 1 AND successes > 0 THEN 1 ELSE 0 END DESC,
-                latest DESC,
                 uses DESC,
                 command ASC
              LIMIT ?2",
@@ -361,29 +361,31 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn ranks_same_directory_and_successful_history_first() {
+    fn ranks_recent_history_before_directory_success_and_usage() {
         let store = Store::in_memory().unwrap();
+        for observed_at_ms in 10..20 {
+            store
+                .record("git switch main", "/repo", 0, observed_at_ms, "one", true)
+                .unwrap();
+        }
         store
             .record("git status", "/other", 0, 300, "one", true)
             .unwrap();
         store
             .record("git stash", "/repo", 1, 200, "one", true)
             .unwrap();
-        store
-            .record("git switch main", "/repo", 0, 100, "one", true)
-            .unwrap();
 
         let candidates = store
             .history_candidates("git s", "/repo", 10, true)
             .unwrap();
-        assert!(candidates[0].same_cwd);
-        assert!(!candidates[2].same_cwd);
+        assert!(!candidates[0].same_cwd);
+        assert!(candidates[1].same_cwd);
         assert_eq!(
             candidates
                 .into_iter()
                 .map(|candidate| candidate.command)
                 .collect::<Vec<_>>(),
-            vec!["git switch main", "git stash", "git status"]
+            vec!["git status", "git stash", "git switch main"]
         );
     }
 
@@ -398,11 +400,11 @@ mod tests {
             .unwrap();
 
         let candidates = store.history_inventory("/repo", 10, true).unwrap();
-        assert_eq!(candidates[0].command, "cargo test");
+        assert_eq!(candidates[0].command, "git status");
         assert!(
             candidates
                 .iter()
-                .any(|candidate| candidate.command == "git status")
+                .any(|candidate| candidate.command == "cargo test")
         );
     }
 

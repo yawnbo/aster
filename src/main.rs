@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -222,6 +222,9 @@ fn write_file_preview(path: PathBuf, cwd: PathBuf) -> Result<()> {
     } else {
         cwd.join(path)
     };
+    if is_env_file(&path) {
+        bail!("preview disabled for .env files");
+    }
     let metadata = fs::symlink_metadata(&path)
         .with_context(|| format!("failed to inspect preview target {}", path.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -278,6 +281,11 @@ fn write_file_preview(path: PathBuf, cwd: PathBuf) -> Result<()> {
         output.write_all(&[0])?;
     }
     Ok(())
+}
+
+fn is_env_file(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.as_encoded_bytes().starts_with(b".env"))
 }
 
 fn write_command_preview(line: &str, cwd: PathBuf) -> Result<()> {
@@ -614,6 +622,8 @@ fn write_completion(response: Response, format: OutputFormat) -> Result<()> {
                     aster::protocol::CandidateKind::File => "file",
                     aster::protocol::CandidateKind::Directory => "directory",
                     aster::protocol::CandidateKind::Option => "option",
+                    aster::protocol::CandidateKind::Subcommand => "subcommand",
+                    aster::protocol::CandidateKind::Value => "value",
                 };
                 for field in [
                     candidate.insert_text.as_str(),
@@ -979,7 +989,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     local bottom_left="╰" bottom_right="╯" separator="·" ellipsis="…"
     local selected_marker="▶ " history_icon="↺" command_icon="❯" native_icon="⇥"
     local fuzzy_ghost_prefix="  → "
-    local file_icon="·" directory_icon="▸" option_icon="-"
+    local file_icon="·" directory_icon="▸" option_icon="-" subcommand_icon="›" value_icon="="
     if (( ! _ASTER_UTF8_UI )); then
       horizontal="-"
       vertical="|"
@@ -996,6 +1006,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       file_icon="F"
       directory_icon="D"
       option_icon="O"
+      subcommand_icon="S"
+      value_icon="V"
       fuzzy_ghost_prefix="  -> "
     fi
     local input="${BUFFER:-$_ASTER_MENU_REQUEST_BUFFER}"
@@ -1055,6 +1067,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
           file) icon="$file_icon" ;;
           directory) icon="$directory_icon" ;;
           option) icon="$option_icon" ;;
+          subcommand) icon="$subcommand_icon" ;;
+          value) icon="$value_icon" ;;
           *) icon="." ;;
         esac
         row="${selected_marker}${icon} ${compact_display}"
@@ -1151,6 +1165,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
         file) icon="$file_icon" ;;
         directory) icon="$directory_icon" ;;
         option) icon="$option_icon" ;;
+        subcommand) icon="$subcommand_icon" ;;
+        value) icon="$value_icon" ;;
         *) icon="." ;;
       esac
       marker="  "
@@ -1388,7 +1404,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       accept="$REPLY"
     fi
     LBUFFER+="$accept"
-    if [[ ( "$source" == native || "$kind" == file || "$kind" == option ) &&
+    if [[ ( "$source" == native || "$kind" == file || "$kind" == option ||
+            "$kind" == subcommand || "$kind" == value ) &&
           "$BUFFER" == "$display" &&
           "${BUFFER[-1]}" != [@/:=,[:space:]] ]]; then
       LBUFFER+=" "
@@ -2396,6 +2413,18 @@ fi
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn suppresses_env_file_previews() {
+        let directory = tempdir().unwrap();
+        for name in [".env", ".env.local", ".environment"] {
+            let path = directory.path().join(name);
+            fs::write(&path, "SECRET=value\n").unwrap();
+            assert!(is_env_file(&path));
+            assert!(write_file_preview(path, directory.path().to_owned()).is_err());
+        }
+        assert!(!is_env_file(&directory.path().join("example.env")));
+    }
 
     #[test]
     fn previews_ls_without_a_shell() {

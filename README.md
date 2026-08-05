@@ -101,7 +101,8 @@ At every argument position Aster offers bounded
 local filesystem matches, so path completion does not depend on a
 command-specific completion function. Root-command flags parsed from man pages
 or sandboxed `--help` output appear lazily with their descriptions ahead of
-duplicate native matches. Quoted
+duplicate native matches. Explicit command sections and documented option values
+from the same metadata provide cached root subcommand and enum completions. Quoted
 replacements, mid-word edits, and other non-append-safe completion behavior
 remain under ordinary Zsh Tab. For ambiguous filesystem matches, Tab accepts
 only their shared prefix and never selects the first entry arbitrarily. An exact
@@ -216,11 +217,14 @@ Implemented:
 - Versioned JSON protocol over an owner-private Unix socket.
 - SQLite WAL history shared by all shells on a host.
 - Change-detected Zsh history import.
-- Current-directory, success, and recency-aware history ranking.
+- Recency-first history ranking, with current directory, success, and usage as
+  tie-breakers.
 - Cached `PATH` command inventory, shell builtins, semantic command icons, and
   authored descriptions for common tools.
 - Lazy command-description enrichment from exact man pages and sandboxed
   `--help` output, with executable-fingerprinted persistent caching.
+- Cached root subcommands and documented option values parsed from explicit help
+  sections, including common Clap, Cobra, Click, and argparse layouts.
 - Asynchronous native Zsh candidate capture for append-safe options,
   subcommands, paths, aliases, and other configured completion sources.
 - Prefix-only completion with conservative partial acceptance.
@@ -241,8 +245,7 @@ change.
 
 Planned:
 
-- Structured option, subcommand, and enum candidates.
-- Filesystem segments.
+- Nested subcommand metadata and typed positional arguments.
 - Optional project-aware providers.
 
 See [`docs/architecture.md`](docs/architecture.md) and

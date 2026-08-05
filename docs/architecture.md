@@ -32,10 +32,11 @@ panes on a host use the same socket and database. SSH sessions use the daemon on
 the remote host, avoiding accidental transfer of command history between
 machines.
 
-Command descriptions and parsed root options use a separate owner-private JSON cache. Entries are keyed
-by resolved executable path, device, inode, size, mode, modification time, and
-change time. This keeps cache loading and persistence independent of the history
-database and its completion lock.
+Command descriptions, parsed root options, subcommands, and documented option
+values use a separate owner-private JSON cache. Entries are keyed by resolved
+executable path, device, inode, size, mode, modification time, and change time.
+This keeps cache loading and persistence independent of the history database and
+its completion lock.
 
 The shell sends only command text, working directory, timestamp, session ID, and
 exit code. Aster does not collect stdout, stderr, environment values, or command
@@ -43,14 +44,17 @@ dependency graphs.
 
 Imported history is tracked by canonical path, size, and modification time. An
 unchanged history file is not reparsed when another shell starts.
+History candidates are ordered by their latest observation first. Same-directory
+use, successful exits, frequency, and command text provide deterministic
+tie-breakers in that order.
 
 ## Completion Tiers
 
 Providers are queried in strict order:
 
-1. Bounded local filesystem matches at argument positions.
-2. Exact-prefix command history.
-3. Parsed and cached root-command options.
+1. Exact-prefix command history.
+2. Bounded local filesystem matches at argument positions.
+3. Parsed and cached root-command options, subcommands, and values.
 4. Append-safe candidates from the active Zsh completion system.
 5. Cached installed-command inventory and known shell builtins for the first
    token.

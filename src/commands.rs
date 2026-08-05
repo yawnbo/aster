@@ -14,11 +14,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-const CACHE_VERSION: u32 = 3;
+const CACHE_VERSION: u32 = 4;
 const CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const OUTPUT_MAX_BYTES: u64 = 64 * 1024;
 const MAX_OPTION_COUNT: usize = 256;
 const MAX_OPTION_SPELLING_BYTES: usize = 128;
+const MAX_SUBCOMMAND_COUNT: usize = 256;
+const MAX_SUBCOMMAND_NAME_BYTES: usize = 128;
+const MAX_VALUE_COUNT: usize = 128;
+const MAX_VALUE_BYTES: usize = 128;
 const QUEUE_CAPACITY: usize = 64;
 const WORKER_COUNT: usize = 2;
 const SUCCESS_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -54,6 +58,30 @@ pub struct OptionMatches {
     pub pending: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubcommandMatch {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubcommandMatches {
+    pub entries: Vec<SubcommandMatch>,
+    pub pending: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValueMatch {
+    pub value: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueMatches {
+    pub entries: Vec<ValueMatch>,
+    pub pending: bool,
+}
+
 #[derive(Debug)]
 pub struct CommandCatalog {
     entries: Vec<CommandEntry>,
@@ -66,6 +94,8 @@ pub struct CommandCatalog {
 struct EnrichmentState {
     descriptions: HashMap<String, String>,
     options: HashMap<String, Vec<OptionMatch>>,
+    subcommands: HashMap<String, Vec<SubcommandMatch>>,
+    option_values: HashMap<String, Vec<OptionValues>>,
     settled: HashSet<String>,
     pending: HashSet<String>,
 }
@@ -97,12 +127,22 @@ struct CachedDescription {
     checked_at_secs: u64,
     description: Option<String>,
     options: Vec<OptionMatch>,
+    subcommands: Vec<SubcommandMatch>,
+    option_values: Vec<OptionValues>,
 }
 
 #[derive(Debug, Default)]
 struct Enrichment {
     description: Option<String>,
     options: Vec<OptionMatch>,
+    subcommands: Vec<SubcommandMatch>,
+    option_values: Vec<OptionValues>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct OptionValues {
+    option: String,
+    values: Vec<ValueMatch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +236,16 @@ impl CommandCatalog {
                         if !cached.options.is_empty() {
                             state.options.insert(name.clone(), cached.options.clone());
                         }
+                        if !cached.subcommands.is_empty() {
+                            state
+                                .subcommands
+                                .insert(name.clone(), cached.subcommands.clone());
+                        }
+                        if !cached.option_values.is_empty() {
+                            state
+                                .option_values
+                                .insert(name.clone(), cached.option_values.clone());
+                        }
                     }
                     jobs.insert(name, job);
                 }
@@ -264,6 +314,62 @@ impl CommandCatalog {
         OptionMatches { entries, pending }
     }
 
+    pub fn matching_subcommands(
+        &self,
+        command: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> SubcommandMatches {
+        let Some(job) = self.jobs.get(command) else {
+            return SubcommandMatches {
+                entries: Vec::new(),
+                pending: false,
+            };
+        };
+        let mut state = self.state.lock().expect("command state lock poisoned");
+        let pending = enqueue_if_unsettled(&mut state, Some(job), self.queue.as_ref());
+        let entries = state
+            .subcommands
+            .get(command)
+            .into_iter()
+            .flatten()
+            .filter(|subcommand| subcommand.name.starts_with(prefix))
+            .take(limit)
+            .cloned()
+            .collect();
+        SubcommandMatches { entries, pending }
+    }
+
+    pub fn matching_values(
+        &self,
+        command: &str,
+        option: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> ValueMatches {
+        let Some(job) = self.jobs.get(command) else {
+            return ValueMatches {
+                entries: Vec::new(),
+                pending: false,
+            };
+        };
+        let mut state = self.state.lock().expect("command state lock poisoned");
+        let pending = enqueue_if_unsettled(&mut state, Some(job), self.queue.as_ref());
+        let entries = state
+            .option_values
+            .get(command)
+            .into_iter()
+            .flatten()
+            .find(|values| values.option == option)
+            .into_iter()
+            .flat_map(|values| &values.values)
+            .filter(|value| value.value.starts_with(prefix))
+            .take(limit)
+            .cloned()
+            .collect();
+        ValueMatches { entries, pending }
+    }
+
     pub fn inventory(&self) -> Vec<CommandMatch> {
         let state = self.state.lock().expect("command state lock poisoned");
         self.entries
@@ -300,6 +406,16 @@ impl CommandCatalog {
 
     #[cfg(test)]
     pub fn from_options(command: &str, options: Vec<OptionMatch>) -> Self {
+        Self::from_structured(command, options, Vec::new(), Vec::new())
+    }
+
+    #[cfg(test)]
+    pub fn from_structured(
+        command: &str,
+        options: Vec<OptionMatch>,
+        subcommands: Vec<SubcommandMatch>,
+        option_values: Vec<(String, Vec<ValueMatch>)>,
+    ) -> Self {
         let entry = CommandEntry {
             name: command.to_owned(),
             description: "Test command".to_owned(),
@@ -322,6 +438,14 @@ impl CommandCatalog {
         };
         let mut state = EnrichmentState::default();
         state.options.insert(command.to_owned(), options);
+        state.subcommands.insert(command.to_owned(), subcommands);
+        state.option_values.insert(
+            command.to_owned(),
+            option_values
+                .into_iter()
+                .map(|(option, values)| OptionValues { option, values })
+                .collect(),
+        );
         state.settled.insert(command.to_owned());
         Self {
             entries: vec![entry],
@@ -424,6 +548,16 @@ fn description_worker(
                         .options
                         .insert(job.name.clone(), enrichment.options.clone());
                 }
+                if !enrichment.subcommands.is_empty() {
+                    state
+                        .subcommands
+                        .insert(job.name.clone(), enrichment.subcommands.clone());
+                }
+                if !enrichment.option_values.is_empty() {
+                    state
+                        .option_values
+                        .insert(job.name.clone(), enrichment.option_values.clone());
+                }
             }
         }
 
@@ -436,6 +570,8 @@ fn description_worker(
                     checked_at_secs: now_secs(),
                     description: enrichment.description,
                     options: enrichment.options,
+                    subcommands: enrichment.subcommands,
+                    option_values: enrichment.option_values,
                 },
             );
             let _ = save_cache(cache_file, &cache);
@@ -445,7 +581,10 @@ fn description_worker(
 
 fn discover_enrichment(job: &DescriptionJob, output_dir: &Path) -> Enrichment {
     let mut enrichment = man_enrichment(&job.name, output_dir).unwrap_or_default();
-    if (enrichment.description.is_none() || enrichment.options.is_empty())
+    if (enrichment.description.is_none()
+        || enrichment.options.is_empty()
+        || enrichment.subcommands.is_empty()
+        || enrichment.option_values.is_empty())
         && let Some(help) = help_enrichment(job, output_dir)
     {
         if enrichment.description.is_none() {
@@ -453,6 +592,12 @@ fn discover_enrichment(job: &DescriptionJob, output_dir: &Path) -> Enrichment {
         }
         if enrichment.options.is_empty() {
             enrichment.options = help.options;
+        }
+        if enrichment.subcommands.is_empty() {
+            enrichment.subcommands = help.subcommands;
+        }
+        if enrichment.option_values.is_empty() {
+            enrichment.option_values = help.option_values;
         }
     }
     enrichment
@@ -476,6 +621,8 @@ fn man_enrichment(name: &str, output_dir: &Path) -> Option<Enrichment> {
     Some(Enrichment {
         description: parse_man_description(name, &output),
         options: parse_options(&output),
+        subcommands: parse_subcommands(&output),
+        option_values: parse_option_values(&output),
     })
 }
 
@@ -505,6 +652,8 @@ fn help_enrichment(job: &DescriptionJob, output_dir: &Path) -> Option<Enrichment
     Some(Enrichment {
         description: parse_help_description(&job.name, &output),
         options: parse_options(&output),
+        subcommands: parse_subcommands(&output),
+        option_values: parse_option_values(&output),
     })
 }
 
@@ -746,6 +895,258 @@ fn parse_options(output: &str) -> Vec<OptionMatch> {
     entries
 }
 
+fn parse_subcommands(output: &str) -> Vec<SubcommandMatch> {
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+    let mut in_commands = false;
+    let mut section_indent = 0;
+    let mut declaration_indent = None;
+
+    for raw_line in output.lines() {
+        let Some(line) = clean_line(raw_line) else {
+            continue;
+        };
+        let text = line.trim();
+        let indent = line.len() - line.trim_start_matches(' ').len();
+
+        if is_commands_heading(text) {
+            in_commands = true;
+            section_indent = indent;
+            declaration_indent = None;
+            continue;
+        }
+        if !in_commands {
+            continue;
+        }
+        if indent <= section_indent && is_section_heading(text) {
+            in_commands = false;
+            declaration_indent = None;
+            continue;
+        }
+        if indent <= section_indent
+            || option_line_has_unsafe_data(raw_line)
+            || text.starts_with('-')
+        {
+            continue;
+        }
+
+        let Some((names, description)) = parse_subcommand_declaration(text) else {
+            continue;
+        };
+        let expected_indent = *declaration_indent.get_or_insert(indent);
+        if indent != expected_indent {
+            continue;
+        }
+        for name in names {
+            if seen.insert(name.clone()) {
+                entries.push(SubcommandMatch {
+                    name,
+                    description: description.clone(),
+                });
+                if entries.len() >= MAX_SUBCOMMAND_COUNT {
+                    return entries;
+                }
+            }
+        }
+    }
+
+    entries
+}
+
+fn parse_subcommand_declaration(line: &str) -> Option<(Vec<String>, String)> {
+    let bytes = line.as_bytes();
+    let column = bytes
+        .windows(2)
+        .position(|pair| pair[0].is_ascii_whitespace() && pair[1].is_ascii_whitespace());
+    let (declaration, description) = if let Some(column) = column {
+        (&line[..column], line[column..].trim())
+    } else if line.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return None;
+    } else {
+        (line, "")
+    };
+    let names: Vec<_> = declaration
+        .split(',')
+        .map(|name| name.trim().trim_end_matches([':', '*']))
+        .filter(|name| valid_subcommand_name(name))
+        .map(str::to_owned)
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    Some((names, sanitize_description(description).unwrap_or_default()))
+}
+
+fn parse_option_values(output: &str) -> Vec<OptionValues> {
+    let mut entries = Vec::new();
+    let mut in_options = false;
+    let mut section_indent = 0;
+    let mut declaration_indent = 0;
+    let mut current_options = Vec::new();
+    let mut collecting_list = false;
+
+    for raw_line in output.lines() {
+        let Some(line) = clean_line(raw_line) else {
+            collecting_list = false;
+            continue;
+        };
+        let text = line.trim();
+        let indent = line.len() - line.trim_start_matches(' ').len();
+
+        if is_options_heading(text) {
+            if in_options {
+                break;
+            }
+            in_options = true;
+            section_indent = indent;
+            current_options.clear();
+            continue;
+        }
+        if !in_options {
+            continue;
+        }
+        if indent <= section_indent && is_section_heading(text) {
+            break;
+        }
+        if option_line_has_unsafe_data(raw_line) {
+            current_options.clear();
+            collecting_list = false;
+            continue;
+        }
+
+        if let Some(declaration) = parse_option_declaration(text) {
+            current_options = declaration.spellings;
+            declaration_indent = indent;
+            let (values, list_follows) = documented_values(text);
+            insert_option_values(&mut entries, &current_options, values);
+            collecting_list = list_follows;
+            continue;
+        }
+
+        if current_options.is_empty() || indent <= declaration_indent {
+            collecting_list = false;
+            continue;
+        }
+        let (values, list_follows) = documented_values(text);
+        if !values.is_empty() || list_follows {
+            insert_option_values(&mut entries, &current_options, values);
+            collecting_list = list_follows;
+        } else if collecting_list {
+            if let Some(value) = documented_value_bullet(text) {
+                insert_option_values(&mut entries, &current_options, vec![value]);
+            } else {
+                collecting_list = false;
+            }
+        }
+    }
+
+    entries
+}
+
+fn insert_option_values(
+    entries: &mut Vec<OptionValues>,
+    options: &[String],
+    values: Vec<ValueMatch>,
+) {
+    if values.is_empty() {
+        return;
+    }
+    for option in options {
+        let index = entries
+            .iter()
+            .position(|entry| entry.option == *option)
+            .unwrap_or_else(|| {
+                entries.push(OptionValues {
+                    option: option.clone(),
+                    values: Vec::new(),
+                });
+                entries.len() - 1
+            });
+        for value in &values {
+            if entries[index].values.len() >= MAX_VALUE_COUNT {
+                break;
+            }
+            if let Some(existing) = entries[index]
+                .values
+                .iter_mut()
+                .find(|existing| existing.value == value.value)
+            {
+                if existing.description.is_empty() {
+                    existing.description = value.description.clone();
+                }
+            } else {
+                entries[index].values.push(value.clone());
+            }
+        }
+    }
+}
+
+fn documented_values(line: &str) -> (Vec<ValueMatch>, bool) {
+    let lower = line.to_ascii_lowercase();
+    for marker in ["possible values:", "possible value:"] {
+        if let Some(index) = lower.find(marker) {
+            let remainder = line[index + marker.len()..]
+                .trim()
+                .trim_matches(|character| matches!(character, '[' | ']' | '(' | ')'))
+                .trim();
+            if remainder.is_empty() {
+                return (Vec::new(), true);
+            }
+            return (parse_value_list(remainder, ','), false);
+        }
+    }
+
+    let syntax_end = line
+        .as_bytes()
+        .windows(2)
+        .position(|pair| pair[0].is_ascii_whitespace() && pair[1].is_ascii_whitespace())
+        .unwrap_or(line.len());
+    let syntax = &line[..syntax_end];
+    for (open, close, separator) in [('{', '}', ','), ('[', ']', '|'), ('<', '>', '|')] {
+        let Some(start) = syntax.find(open) else {
+            continue;
+        };
+        let Some(end_offset) = syntax[start + 1..].find(close) else {
+            continue;
+        };
+        let values = &syntax[start + 1..start + 1 + end_offset];
+        if values.contains(separator) {
+            return (parse_value_list(values, separator), false);
+        }
+    }
+    (Vec::new(), false)
+}
+
+fn parse_value_list(values: &str, separator: char) -> Vec<ValueMatch> {
+    values
+        .split(separator)
+        .filter_map(|value| {
+            let value = value
+                .trim()
+                .trim_matches(|character| matches!(character, '\'' | '"' | '`'));
+            valid_value(value).then(|| ValueMatch {
+                value: value.to_owned(),
+                description: String::new(),
+            })
+        })
+        .take(MAX_VALUE_COUNT)
+        .collect()
+}
+
+fn documented_value_bullet(line: &str) -> Option<ValueMatch> {
+    let line = line.strip_prefix('-')?.trim_start();
+    let (value, description) = line
+        .split_once(':')
+        .map_or((line, ""), |(value, description)| {
+            (value.trim(), description.trim())
+        });
+    let value = value.trim_matches(|character| matches!(character, '\'' | '"' | '`'));
+    valid_value(value).then(|| ValueMatch {
+        value: value.to_owned(),
+        description: sanitize_description(description).unwrap_or_default(),
+    })
+}
+
 struct ParsedOptionDeclaration {
     spellings: Vec<String>,
     description: Option<String>,
@@ -949,6 +1350,21 @@ fn is_options_heading(line: &str) -> bool {
     )
 }
 
+fn is_commands_heading(line: &str) -> bool {
+    let has_colon = line.ends_with(':');
+    let heading = line.trim_end_matches(':');
+    let lower = heading.to_ascii_lowercase();
+    let heading_shape = has_colon
+        || heading
+            .chars()
+            .filter(|character| character.is_ascii_alphabetic())
+            .all(|character| character.is_ascii_uppercase());
+    matches!(
+        lower.as_str(),
+        "command" | "commands" | "available commands" | "subcommands" | "the commands are"
+    ) || heading_shape && lower.ends_with(" commands")
+}
+
 fn is_section_heading(line: &str) -> bool {
     let heading = line.trim_end_matches(':');
     let lower = heading.to_ascii_lowercase();
@@ -1064,6 +1480,36 @@ fn load_cache(path: &Path) -> DescriptionCache {
             true
         });
         cached.options.truncate(MAX_OPTION_COUNT);
+
+        seen.clear();
+        cached.subcommands.retain_mut(|subcommand| {
+            if !valid_subcommand_name(&subcommand.name) || !seen.insert(subcommand.name.clone()) {
+                return false;
+            }
+            subcommand.description =
+                sanitize_description(&subcommand.description).unwrap_or_default();
+            true
+        });
+        cached.subcommands.truncate(MAX_SUBCOMMAND_COUNT);
+
+        seen.clear();
+        cached.option_values.retain_mut(|option_values| {
+            if !valid_option_spelling(&option_values.option)
+                || !seen.insert(option_values.option.clone())
+            {
+                return false;
+            }
+            let mut seen_values = HashSet::new();
+            option_values.values.retain_mut(|value| {
+                if !valid_value(&value.value) || !seen_values.insert(value.value.clone()) {
+                    return false;
+                }
+                value.description = sanitize_description(&value.description).unwrap_or_default();
+                true
+            });
+            option_values.values.truncate(MAX_VALUE_COUNT);
+            !option_values.values.is_empty()
+        });
     }
     cache
 }
@@ -1105,7 +1551,10 @@ fn save_cache(path: &Path, cache: &DescriptionCache) -> std::io::Result<()> {
 }
 
 fn cache_is_fresh(cached: &CachedDescription, now: u64) -> bool {
-    let ttl = if !cached.options.is_empty() {
+    let ttl = if !cached.options.is_empty()
+        || !cached.subcommands.is_empty()
+        || !cached.option_values.is_empty()
+    {
         SUCCESS_TTL
     } else {
         MISS_TTL
@@ -1146,6 +1595,25 @@ fn valid_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'+'))
+}
+
+fn valid_subcommand_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_SUBCOMMAND_NAME_BYTES
+        && name.is_ascii()
+        && name.as_bytes()[0].is_ascii_alphanumeric()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'+'))
+}
+
+fn valid_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_VALUE_BYTES
+        && value.is_ascii()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'+' | b'/')
+        })
 }
 
 fn fallback_description(path: &Path) -> String {
@@ -1374,6 +1842,91 @@ mod tests {
     }
 
     #[test]
+    fn parses_explicit_subcommand_sections() {
+        let output = "Usage: tool [COMMAND]\n\nAvailable Commands:\n\
+                      \x20  build, b  Build the project\n\
+                      \x20  inspect   Inspect project state\n\
+                      \x20    continuation text that is not a command\n\nOptions:\n\
+                      \x20  --help    Print help\n\nAdditional Commands:\n\
+                      \x20  deploy:   Deploy the project\n";
+
+        assert_eq!(
+            parse_subcommands(output),
+            [
+                SubcommandMatch {
+                    name: "build".to_owned(),
+                    description: "Build the project".to_owned(),
+                },
+                SubcommandMatch {
+                    name: "b".to_owned(),
+                    description: "Build the project".to_owned(),
+                },
+                SubcommandMatch {
+                    name: "inspect".to_owned(),
+                    description: "Inspect project state".to_owned(),
+                },
+                SubcommandMatch {
+                    name: "deploy".to_owned(),
+                    description: "Deploy the project".to_owned(),
+                },
+            ]
+        );
+
+        let prose = "Tool for running commands\n\
+                     \x20  This paragraph is not a command declaration.\n\nCommands:\n\
+                     \x20  valid  A real command\n\
+                     \x20  Commands can be abbreviated\n";
+        assert_eq!(
+            parse_subcommands(prose),
+            [SubcommandMatch {
+                name: "valid".to_owned(),
+                description: "A real command".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_documented_option_values_for_every_alias() {
+        let output = "Options:\n\
+                      \x20  -c, --color <WHEN>  Color output [possible values: auto, always, never]\n\
+                      \x20  --format {json,yaml}  Output format\n\
+                      \x20  --mode <fast|safe>    Execution mode\n\
+                      \x20  --template TEMPLATE  Expand {name,id} placeholders\n\
+                      \x20  --target <TARGET>\n\
+                      \x20      Possible values:\n\
+                      \x20      - local: Run locally\n\
+                      \x20      - remote: Run remotely\n";
+        let values = parse_option_values(output);
+
+        for option in ["-c", "--color"] {
+            assert_eq!(
+                values
+                    .iter()
+                    .find(|entry| entry.option == option)
+                    .unwrap()
+                    .values
+                    .iter()
+                    .map(|value| value.value.as_str())
+                    .collect::<Vec<_>>(),
+                ["auto", "always", "never"]
+            );
+        }
+        assert_eq!(values_for(&values, "--format"), ["json", "yaml"]);
+        assert_eq!(values_for(&values, "--mode"), ["fast", "safe"]);
+        assert!(!values.iter().any(|entry| entry.option == "--template"));
+        assert_eq!(values_for(&values, "--target"), ["local", "remote"]);
+        assert_eq!(
+            values
+                .iter()
+                .find(|entry| entry.option == "--target")
+                .unwrap()
+                .values[0]
+                .description,
+            "Run locally"
+        );
+    }
+
+    #[test]
     fn rejects_usage_prose_subcommands_and_malicious_option_spellings() {
         let output = "Usage: tool --usage-only\n\
                       \x20Prose mentions --prose-only but is not an option.\n\
@@ -1433,6 +1986,17 @@ mod tests {
                     spelling: "--verbose".to_owned(),
                     description: "Show more detail".to_owned(),
                 }],
+                subcommands: vec![SubcommandMatch {
+                    name: "inspect".to_owned(),
+                    description: "Inspect a project".to_owned(),
+                }],
+                option_values: vec![OptionValues {
+                    option: "--color".to_owned(),
+                    values: vec![ValueMatch {
+                        value: "always".to_owned(),
+                        description: String::new(),
+                    }],
+                }],
             },
         );
 
@@ -1449,6 +2013,11 @@ mod tests {
                 spelling: "--verbose".to_owned(),
                 description: "Show more detail".to_owned(),
             }]
+        );
+        assert_eq!(loaded.entries["tool"].subcommands[0].name, "inspect");
+        assert_eq!(
+            loaded.entries["tool"].option_values[0].values[0].value,
+            "always"
         );
     }
 
@@ -1563,5 +2132,16 @@ mod tests {
             },
             authored_description,
         }
+    }
+
+    fn values_for<'a>(values: &'a [OptionValues], option: &str) -> Vec<&'a str> {
+        values
+            .iter()
+            .find(|entry| entry.option == option)
+            .unwrap()
+            .values
+            .iter()
+            .map(|value| value.value.as_str())
+            .collect()
     }
 }
