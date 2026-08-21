@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
+pub const PATH_GRID_CANDIDATES: usize = 40;
+pub const PATH_GRID_REQUEST_LIMIT: usize = usize::MAX;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequestEnvelope {
@@ -106,4 +108,25 @@ pub enum CandidateSource {
     Command,
     Filesystem,
     Help,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_grid_uses_the_existing_complete_request_shape() {
+        let payload = format!(
+            r#"{{"version":8,"type":"complete","buffer":"ls /usr/bin/","cursor_byte":12,"cwd":"/tmp","limit":{PATH_GRID_REQUEST_LIMIT}}}"#
+        );
+        let envelope: RequestEnvelope = serde_json::from_str(&payload).unwrap();
+        assert_eq!(envelope.version, 8);
+        assert!(matches!(
+            envelope.request,
+            Request::Complete {
+                limit: Some(PATH_GRID_REQUEST_LIMIT),
+                ..
+            }
+        ));
+    }
 }

@@ -82,16 +82,15 @@ changes and highlights the highest-ranked candidate. It owns `POSTDISPLAY` while
 suggestions are active, so the ghost text and bordered menu participate in ZLE's
 normal multiline layout instead of being printed into terminal history. ZLE
 `region_highlight` entries style matches, provenance, borders, and the selected
-row using validated colors from the UI configuration. Ctrl-N and Ctrl-K move
+row using validated colors from the UI configuration. Ctrl-N and Ctrl-P move
 the selection; Shift-Tab cycles it, and the configured completion key accepts
 its configured amount and immediately queries again. Tab accepts the shortest
-next semantic segment while the menu is open. Boundaries include words, paths,
+next semantic segment of the highlighted candidate while the menu is open. The
+ghost text shows that same candidate. Boundaries include words, paths,
 assignments, lists, URLs, and remote destinations such as `user@host:/path`;
-quoted, escaped, and bracketed IPv6 separators remain intact. When multiple
-filesystem candidates are present, Tab accepts their common insertion prefix if
-one exists and otherwise leaves the buffer unchanged instead of selecting an
-arbitrary first entry. Exact files remain as explicit candidates whose next Tab
-adds the trailing space.
+quoted, escaped, and bracketed IPv6 separators remain intact. This behavior also
+applies when multiple filesystem candidates are present. Exact files remain as
+explicit candidates whose next Tab adds the trailing space.
 After any accepted segment, the refreshed menu starts at row 1 rather than
 carrying its previous index forward. Selection does not change the
 editing keymap, so character insertion and Backspace keep their ordinary
@@ -103,6 +102,12 @@ menu requests, preventing stale callbacks from restoring the pre-history buffer.
 The integration snapshots native widgets only on first load, but reinstalls its
 functions, hooks, and bindings on every evaluation so sourcing `.zshrc` remains
 safe after `compinit` or other ZLE plugins recreate their wrappers.
+
+Ctrl-K replaces Zsh's kill-line binding and toggles an expanded filesystem-only
+request. The response is capped at 40 entries and rendered as a basename-only,
+full-width grid without descriptions or previews. Typing keeps grid mode active;
+Escape or Ctrl-K returns to the normal menu. Tab continues to accept the
+shortest next segment of the highlighted candidate in either layout.
 
 Two consecutive spaces enter an explicit fuzzy mode and both trigger spaces are
 removed before saving the fuzzy base. Query text is mirrored into `BUFFER` so

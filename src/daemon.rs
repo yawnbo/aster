@@ -15,7 +15,10 @@ use crate::VERSION;
 use crate::commands::CommandCatalog;
 use crate::config::{Paths, Settings};
 use crate::engine;
-use crate::protocol::{PROTOCOL_VERSION, Request, RequestEnvelope, Response};
+use crate::protocol::{
+    CompletionResponse, PATH_GRID_CANDIDATES, PATH_GRID_REQUEST_LIMIT, PROTOCOL_VERSION, Request,
+    RequestEnvelope, Response,
+};
 use crate::store::Store;
 
 const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
@@ -234,6 +237,26 @@ fn dispatch(
         } => {
             if cwd.len() > MAX_PATH_BYTES {
                 bail!("working directory is too long");
+            }
+            if limit == Some(PATH_GRID_REQUEST_LIMIT) {
+                let mut paths = engine::filesystem_candidates(
+                    &buffer,
+                    cursor_byte,
+                    &cwd,
+                    PATH_GRID_CANDIDATES + 1,
+                )?;
+                if paths.len() > PATH_GRID_CANDIDATES {
+                    paths.truncate(PATH_GRID_CANDIDATES);
+                    if let Some(first) = paths.first_mut() {
+                        first.description.push_str(" (more matches)");
+                    }
+                }
+                return Ok(Response::Completion(CompletionResponse {
+                    replace_start_byte: cursor_byte,
+                    replace_end_byte: cursor_byte,
+                    candidates: paths,
+                    enrichment_pending: false,
+                }));
             }
             let mut completion = {
                 let store = store.lock().expect("store lock poisoned");

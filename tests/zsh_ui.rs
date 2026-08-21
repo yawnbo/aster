@@ -38,6 +38,13 @@ fn popup_preserves_highlights_and_shell_bindings() {
     fs::write(&preview_file_two, "preview-other-candidate\n").unwrap();
     fs::write(temporary.path().join("filesystem-alpha"), "alpha").unwrap();
     fs::write(temporary.path().join("filesystem-beta"), "beta").unwrap();
+    for index in 0..24 {
+        fs::write(
+            temporary.path().join(format!("grid-file-{index:02}")),
+            "grid",
+        )
+        .unwrap();
+    }
     fs::write(
         temporary.path().join("kitty.conf"),
         "font_family monospace\n",
@@ -118,7 +125,7 @@ _aster_test_dump_state() {{
     command rm -f -- {escape_request}
     _aster_escape
   fi
-  print -r -- "$_ASTER_MENU_ACTIVE|${{#_ASTER_MENU_ACCEPTS}}|$_ASTER_MENU_BUFFER|$BUFFER|${{_ASTER_MENU_ACCEPTS[1]}}|$_ASTER_MENU_INDEX|${{_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}}|$_ASTER_FUZZY_ACTIVE|$_ASTER_FUZZY_BASE|$_ASTER_FUZZY_QUERY|$_ASTER_PREVIEW_FD|$_ASTER_PREVIEW_TICKS|$_ASTER_PREVIEW_PATH|${{(j:;:)_ASTER_PREVIEW_LINES}}|${{(j:;:)_ASTER_MENU_DISPLAYS}}|${{POSTDISPLAY%%$'\n'*}}|${{(j:;:)_ASTER_MENU_SOURCES}}" > {state_dump}
+  print -r -- "$_ASTER_MENU_ACTIVE|${{#_ASTER_MENU_ACCEPTS}}|$_ASTER_MENU_BUFFER|$BUFFER|${{_ASTER_MENU_ACCEPTS[1]}}|$_ASTER_MENU_INDEX|${{_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}}|$_ASTER_FUZZY_ACTIVE|$_ASTER_FUZZY_BASE|$_ASTER_FUZZY_QUERY|$_ASTER_PREVIEW_FD|$_ASTER_PREVIEW_TICKS|$_ASTER_PREVIEW_PATH|${{(j:;:)_ASTER_PREVIEW_LINES}}|${{(j:;:)_ASTER_MENU_DISPLAYS}}|${{POSTDISPLAY%%$'\n'*}}|${{(j:;:)_ASTER_MENU_SOURCES}}|$_ASTER_GRID_ACTIVE" > {state_dump}
 }}
 _aster_test_sync() {{
   : > {sync_file}
@@ -276,7 +283,7 @@ PROMPT='%# '
         .unwrap();
     wait_for_zle(&server, &sync_file);
     let binding_command = format!(
-        "{{ bindkey '^M'; bindkey '^I'; bindkey '^[[Z'; }} > {}",
+        "{{ bindkey '^M'; bindkey '^I'; bindkey '^[[Z'; bindkey '^P'; bindkey '^K'; }} > {}",
         shell_quote(binding_file.to_str().unwrap())
     );
     Command::new("tmux")
@@ -302,6 +309,8 @@ PROMPT='%# '
     assert!(binding.contains(r#""^M" accept-line"#));
     assert!(binding.contains(r#""^I" aster-tab"#));
     assert!(binding.contains("aster-shift-tab"));
+    assert!(binding.contains(r#""^P" aster-menu-up"#));
+    assert!(binding.contains(r#""^K" aster-grid-toggle"#));
 
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0", "cd "])
@@ -697,9 +706,12 @@ PROMPT='%# '
     );
     dump_zle_state(&server);
     let scp_before_tab = fs::read_to_string(&state_dump).unwrap();
-    assert!(
-        scp_before_tab.contains(&format!("|{scp_path_prefix}|{scp_path_prefix}|")),
-        "Aster did not retain the scp path prefix: {scp_before_tab:?}"
+    let scp_before_tab_fields: Vec<_> = scp_before_tab.trim_end().split('|').collect();
+    assert_eq!(scp_before_tab_fields[3], scp_path_prefix);
+    assert_eq!(scp_before_tab_fields[6], format!("{scp_path_prefix}alpha"));
+    assert_eq!(
+        scp_before_tab_fields[15], "alpha",
+        "filesystem ghost text did not match the highlighted candidate"
     );
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "Tab"])
@@ -708,28 +720,11 @@ PROMPT='%# '
     thread::sleep(Duration::from_millis(50));
     dump_zle_state(&server);
     let scp_after_tab = fs::read_to_string(&state_dump).unwrap();
-    assert!(
-        scp_after_tab.contains(&format!("|{scp_path_prefix}|{scp_path_prefix}|")),
-        "ambiguous path Tab selected an arbitrary file: {scp_after_tab:?}"
-    );
-    Command::new("tmux")
-        .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0", "a"])
-        .status()
-        .unwrap();
-    thread::sleep(Duration::from_millis(100));
-    Command::new("tmux")
-        .args(["-L", &server, "send-keys", "-t", "test:0.0", "Tab"])
-        .status()
-        .unwrap();
-    dump_zle_state(&server);
-    let scp_unique_path = fs::read_to_string(&state_dump).unwrap();
-    assert!(
-        scp_unique_path.contains(&format!(
-            "|{}filesystem-alpha |{}filesystem-alpha |",
-            &scp_path_prefix[..scp_path_prefix.len() - "filesystem-".len()],
-            &scp_path_prefix[..scp_path_prefix.len() - "filesystem-".len()]
-        )),
-        "Tab did not accept the unique filesystem candidate: {scp_unique_path:?}"
+    let scp_after_tab_fields: Vec<_> = scp_after_tab.trim_end().split('|').collect();
+    assert_eq!(
+        scp_after_tab_fields[3],
+        format!("{scp_path_prefix}alpha "),
+        "Tab did not accept the filesystem candidate shown as ghost text"
     );
 
     Command::new("tmux")
@@ -749,17 +744,119 @@ PROMPT='%# '
         .status()
         .unwrap();
     dump_zle_state(&server);
-    let common_path_state = fs::read_to_string(&state_dump).unwrap();
-    let common_path_fields: Vec<_> = common_path_state.trim_end().split('|').collect();
-    assert_eq!(common_path_fields[3], format!("{kitty_prefix}f"));
+    let selected_path_state = fs::read_to_string(&state_dump).unwrap();
+    let selected_path_fields: Vec<_> = selected_path_state.trim_end().split('|').collect();
+    assert_eq!(selected_path_fields[3], format!("{kitty_prefix}f "));
+
     Command::new("tmux")
-        .args(["-L", &server, "send-keys", "-t", "test:0.0", "Tab"])
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
         .status()
         .unwrap();
+    wait_for_zle(&server, &sync_file);
+    let grid_prefix = format!("cat {}/grid-file-", temporary.path().display());
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0"])
+        .arg(&grid_prefix)
+        .status()
+        .unwrap();
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-k"])
+        .status()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut grid_capture = String::new();
+    while Instant::now() < deadline {
+        grid_capture = capture_pane(&server, false);
+        if grid_capture.contains("Files 1-24/24") && grid_capture.contains("grid-file-23") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        grid_capture.contains("Files 1-24/24")
+            && grid_capture.contains("grid-file-00")
+            && grid_capture.contains("grid-file-23")
+            && !grid_capture.contains(" File "),
+        "expanded filesystem grid was absent or not compact:\n{grid_capture}"
+    );
     dump_zle_state(&server);
-    let exact_path_state = fs::read_to_string(&state_dump).unwrap();
-    let exact_path_fields: Vec<_> = exact_path_state.trim_end().split('|').collect();
-    assert_eq!(exact_path_fields[3], format!("{kitty_prefix}f "));
+    let grid_state = fs::read_to_string(&state_dump).unwrap();
+    let grid_fields: Vec<_> = grid_state.trim_end().split('|').collect();
+    assert_eq!(grid_fields[1], "24");
+    assert_eq!(grid_fields[17], "1");
+
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-n", "C-p"])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(100));
+    dump_zle_state(&server);
+    let grid_navigation_state = fs::read_to_string(&state_dump).unwrap();
+    let grid_navigation_fields: Vec<_> = grid_navigation_state.trim_end().split('|').collect();
+    assert_eq!(grid_navigation_fields[3], grid_prefix);
+    assert_eq!(grid_navigation_fields[5], "1");
+    assert_eq!(grid_navigation_fields[17], "1");
+    let cycled_grid = capture_pane(&server, false);
+    assert!(
+        !cycled_grid.contains("row=''") && !cycled_grid.contains("row=\"\""),
+        "grid redraw leaked a local declaration into the terminal:\n{cycled_grid}"
+    );
+
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0", "0"])
+        .status()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        dump_zle_state(&server);
+        let narrowed = fs::read_to_string(&state_dump).unwrap();
+        let fields: Vec<_> = narrowed.trim_end().split('|').collect();
+        if fields[1] == "10" && fields[17] == "1" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "grid did not narrow after typing: {narrowed:?}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-k"])
+        .status()
+        .unwrap();
+    thread::sleep(Duration::from_millis(50));
+    dump_zle_state(&server);
+    let closed_grid = fs::read_to_string(&state_dump).unwrap();
+    assert_eq!(closed_grid.trim_end().split('|').nth(17), Some("0"));
+
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])
+        .status()
+        .unwrap();
+    wait_for_zle(&server, &sync_file);
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-l", "-t", "test:0.0"])
+        .arg(format!("cat {}/no-grid-match", temporary.path().display()))
+        .status()
+        .unwrap();
+    Command::new("tmux")
+        .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-k"])
+        .status()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        dump_zle_state(&server);
+        let empty_grid = fs::read_to_string(&state_dump).unwrap();
+        let fields: Vec<_> = empty_grid.trim_end().split('|').collect();
+        if fields[0] == "0" && fields[17] == "0" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "empty grid fell through to another completion source: {empty_grid:?}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
 
     Command::new("tmux")
         .args(["-L", &server, "send-keys", "-t", "test:0.0", "C-c"])

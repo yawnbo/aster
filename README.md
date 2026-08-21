@@ -81,9 +81,11 @@ The integration:
   short deadline.
 - Uses Ctrl-Space to accept the entire highlighted candidate and preserves its
   previous binding as the fallback when Aster has no candidate.
-- Uses Ctrl-N and Ctrl-K to move through an open menu and updates inline ghost
+- Uses Ctrl-N and Ctrl-P to move through an open menu and updates inline ghost
   text to preview the selected row; outside the menu their prior widgets remain
   active.
+- Uses Ctrl-K to toggle a dense, filesystem-only grid with up to 40 paths while
+  leaving Tab's completion behavior unchanged.
 - Leaves Up and Down dedicated to their existing Zsh history widgets, cancelling
   stale completion work before history changes the command buffer.
 - Accepts the full suggestion with Ctrl-Space, or the shortest next segment with
@@ -105,8 +107,8 @@ duplicate native matches. Explicit command sections and documented option values
 from the same metadata provide cached root subcommand and enum completions. Quoted
 replacements, mid-word edits, and other non-append-safe completion behavior
 remain under ordinary Zsh Tab. For ambiguous filesystem matches, Tab accepts
-only their shared prefix and never selects the first entry arbitrarily. An exact
-file remains selectable with a following Tab, which appends a space.
+the shortest next segment of the highlighted candidate, which is also shown as
+ghost text. An exact file remains selectable with Tab, which appends a space.
 
 The same setup works inside tmux and on SSH hosts. Each remote host runs its own
 daemon and keeps its own local history; tmux panes on that host share it.
@@ -188,7 +190,7 @@ selected_source = "0"
 ```
 
 `completion.key` also accepts Ctrl-letter names such as `ctrl-x`. Ctrl-I (Tab),
-Ctrl-J, Ctrl-K, Ctrl-M, and Ctrl-N are reserved by the menu integration. The
+Ctrl-J, Ctrl-K, Ctrl-M, Ctrl-N, and Ctrl-P are reserved by the menu integration. The
 generated binding is refreshed when a new shell starts.
 UI colors accept ANSI palette indexes from `0` through `255` or exact `#RRGGBB`
 values. ANSI indexes follow the active terminal theme. `prompt_offset` is the

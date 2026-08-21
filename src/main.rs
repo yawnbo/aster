@@ -50,6 +50,9 @@ enum Command {
         cwd: PathBuf,
         #[arg(long)]
         limit: Option<usize>,
+        /// Return an expanded filesystem-only candidate set.
+        #[arg(long)]
+        paths_only: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
     },
@@ -150,6 +153,7 @@ fn run() -> Result<()> {
             cursor,
             cwd,
             limit,
+            paths_only,
             format,
         } => {
             let response = client::request_idempotent(
@@ -158,7 +162,11 @@ fn run() -> Result<()> {
                     buffer: read_input(buffer, stdin, 64 * 1024)?,
                     cursor_byte: cursor,
                     cwd: cwd.to_string_lossy().into_owned(),
-                    limit,
+                    limit: if paths_only {
+                        Some(aster::protocol::PATH_GRID_REQUEST_LIMIT)
+                    } else {
+                        limit
+                    },
                 },
             )?;
             write_completion(response, format)
@@ -691,6 +699,7 @@ fn zsh_integration(settings: &Settings) -> Result<String> {
     let menu_width = settings.ui.menu_width.to_string();
     let max_visible = settings.ui.max_visible.to_string();
     let max_candidates = settings.completion.max_candidates.to_string();
+    let path_grid_candidates = aster::protocol::PATH_GRID_CANDIDATES.to_string();
     Ok(r#"# Aster shell integration
 if [[ -o interactive ]] && (( $+commands[aster] )); then
   typeset -g ASTER_ZSH_LOADED=1
@@ -728,6 +737,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   typeset -g _ASTER_FUZZY_QUERY=""
   typeset -g _ASTER_FUZZY_KEYTIMEOUT=-1
   typeset -g _ASTER_FUZZY_PREVIOUS_KEYMAP=""
+  typeset -g _ASTER_GRID_ACTIVE=0
   typeset -g _ASTER_PREVIEW_FD=-1
   typeset -g _ASTER_PREVIEW_PID=-1
   typeset -g _ASTER_PREVIEW_TICKS=0
@@ -932,12 +942,14 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
 
   _aster_menu_clear() {
     local preserve_buffer="${1:-0}"
+    local preserve_grid="${2:-0}"
     _aster_menu_cancel_request
     _ASTER_MENU_ACTIVE=0
     _ASTER_MENU_INDEX=1
     _ASTER_MENU_START=1
     _ASTER_RESTORE_HIGHLIGHTS=0
     _ASTER_CAPTURE_FOREIGN_HIGHLIGHTS=0
+    (( preserve_grid )) || _ASTER_GRID_ACTIVE=0
     _aster_fuzzy_reset
     _aster_preview_clear
     (( preserve_buffer )) || _ASTER_MENU_BUFFER=""
@@ -963,6 +975,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
 
   _aster_fuzzy_start() {
     (( CURSOR == ${#BUFFER} )) || return 1
+    _ASTER_GRID_ACTIVE=0
     _ASTER_FUZZY_KEYTIMEOUT=$KEYTIMEOUT
     _ASTER_FUZZY_PREVIOUS_KEYMAP="$KEYMAP"
     KEYTIMEOUT=1
@@ -1033,6 +1046,76 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     fi
     if [[ -n "$ghost" ]]; then
       region_highlight+=("$buffer_end $(( buffer_end + ${#ghost} )) fg=__ASTER_UI_GHOST__ memo=aster")
+    fi
+    if (( _ASTER_GRID_ACTIVE && total > 0 && ${COLUMNS:-80} >= 12 && ${LINES:-24} >= 6 )); then
+      _aster_preview_clear
+      local grid_width=$(( ${COLUMNS:-80} - 2 ))
+      local max_label=0 label path cell line line_start
+      local -a grid_labels display_words
+      for (( index = 1; index <= total; index++ )); do
+        display="$_ASTER_MENU_DISPLAYS[$index]"
+        display_words=("${(z)display}")
+        if (( ${#display_words} )); then
+          path="${(Q)display_words[-1]}"
+          path="${path%/}"
+          label="${path:t}"
+        else
+          label="$display"
+        fi
+        [[ "$_ASTER_MENU_KINDS[$index]" == directory ]] && label+="/"
+        grid_labels+=("$label")
+        (( ${#label} > max_label )) && max_label=${#label}
+      done
+      (( max_label > 24 )) && max_label=24
+      local cell_width=$(( max_label + 4 ))
+      (( cell_width < 12 )) && cell_width=12
+      (( cell_width > 28 )) && cell_width=28
+      local columns=$(( grid_width / cell_width ))
+      (( columns < 1 )) && columns=1
+      (( columns > total )) && columns=$total
+      local max_rows=8
+      local available_rows=$(( ${LINES:-24} - 4 ))
+      (( available_rows < max_rows )) && max_rows=$available_rows
+      local page_size=$(( columns * max_rows ))
+      local page_start=$(( ((_ASTER_MENU_INDEX - 1) / page_size) * page_size + 1 ))
+      local page_end=$(( page_start + page_size - 1 ))
+      (( page_end > total )) && page_end=$total
+      local rows=$(( (page_end - page_start + columns) / columns ))
+      local header=" Files ${page_start}-${page_end}/${total}  C-K close ${separator} C-P/N move ${separator} Tab part ${separator} __ASTER_COMPLETION_KEY_LABEL__ full "
+      (( ${#header} > grid_width )) && header="${header[1,$(( grid_width - 1 ))]}${ellipsis}"
+      line_start=$(( ${#input} + ${#POSTDISPLAY} + 1 ))
+      POSTDISPLAY+=$'\n'"$header"
+      region_highlight+=("$line_start $(( line_start + ${#header} )) fg=__ASTER_UI_MUTED__ memo=aster")
+
+      local column grid_index text_width=$(( cell_width - 2 ))
+      for (( row = 0; row < rows; row++ )); do
+        line=""
+        for (( column = 0; column < columns; column++ )); do
+          grid_index=$(( page_start + row * columns + column ))
+          (( grid_index <= page_end )) || break
+          label="$grid_labels[$grid_index]"
+          if (( ${#label} > text_width )); then
+            label="${label[1,$(( text_width - 1 ))]}${ellipsis}"
+          fi
+          kind="$_ASTER_MENU_KINDS[$grid_index]"
+          [[ "$kind" == directory ]] && icon="$directory_icon" || icon="$file_icon"
+          printf -v cell '%s %-*s' "$icon" "$text_width" "$label"
+          line+="$cell"
+        done
+        line_start=$(( ${#input} + ${#POSTDISPLAY} + 1 ))
+        POSTDISPLAY+=$'\n'"$line"
+        region_highlight+=("$line_start $(( line_start + ${#line} )) fg=__ASTER_UI_TEXT__ memo=aster")
+        if (( _ASTER_MENU_INDEX >= page_start + row * columns &&
+              _ASTER_MENU_INDEX < page_start + (row + 1) * columns )); then
+          column=$(( (_ASTER_MENU_INDEX - page_start) % columns ))
+          local selected_start=$(( line_start + column * cell_width ))
+          local selected_end=$(( selected_start + cell_width ))
+          (( selected_end > line_start + ${#line} )) && selected_end=$(( line_start + ${#line} ))
+          region_highlight+=("$selected_start $selected_end bg=__ASTER_UI_SELECTED_BACKGROUND__,fg=__ASTER_UI_SELECTED_TEXT__,bold memo=aster")
+        fi
+      done
+      _ASTER_MENU_OWNS_DISPLAY=1
+      return 0
     fi
     local box_width=$(( ${COLUMNS:-80} - 2 ))
     (( box_width > __ASTER_UI_MENU_WIDTH__ )) && box_width=__ASTER_UI_MENU_WIDTH__
@@ -1116,9 +1199,9 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     printf -v fill '%*s' "$(( box_width - ${#top_prefix} - ${#count} - 1 ))" ""
     fill="${fill// /$horizontal}"
     top="${top_prefix}${fill}${count}${top_right}"
-    local footer=" S-Tab/K up ${separator} C-N down ${separator} Tab part ${separator} __ASTER_COMPLETION_KEY_LABEL__ full "
+    local footer=" S-Tab/P up ${separator} C-N down ${separator} Tab part ${separator} __ASTER_COMPLETION_KEY_LABEL__ full "
     (( _ASTER_FUZZY_ACTIVE )) && \
-      footer=" Esc exit ${separator} C-K up ${separator} C-N down ${separator} Tab choose ${separator} Enter run "
+      footer=" Esc exit ${separator} C-P up ${separator} C-N down ${separator} Tab choose ${separator} Enter run "
     local bottom_prefix="${bottom_left}${horizontal}${footer}"
     printf -v fill '%*s' "$(( box_width - ${#bottom_prefix} - 1 ))" ""
     fill="${fill// /$horizontal}"
@@ -1423,45 +1506,6 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     fi
   }
 
-  _aster_path_accept() {
-    local index found=0 common="" candidate
-    for (( index = 1; index <= ${#_ASTER_MENU_ACCEPTS}; index++ )); do
-      [[ "${_ASTER_MENU_KINDS[$index]}" == file ||
-         "${_ASTER_MENU_KINDS[$index]}" == directory ]] || continue
-      (( found++ ))
-      candidate="${_ASTER_MENU_ACCEPTS[$index]}"
-      if [[ -z "$common" ]]; then
-        common="$candidate"
-      else
-        while [[ -n "$common" && "$candidate" != "$common"* ]]; do
-          common="${common[1,-2]}"
-        done
-      fi
-    done
-    if [[ "${_ASTER_MENU_KINDS[$_ASTER_MENU_INDEX]}" == file &&
-          "${_ASTER_MENU_DISPLAYS[$_ASTER_MENU_INDEX]}" == "$BUFFER" ]]; then
-      _aster_menu_accept segment
-      return
-    fi
-    if (( found == 1 )) && [[ "${_ASTER_MENU_DESCRIPTIONS[$_ASTER_MENU_INDEX]}" != *"(more matches)" ]]; then
-      _aster_menu_accept segment
-      return
-    fi
-    if [[ -n "$common" && "${(j: :)_ASTER_MENU_DESCRIPTIONS}" != *"(more matches)"* ]]; then
-      _aster_next_segment "$common"
-      if [[ -n "$REPLY" ]]; then
-        LBUFFER+="$REPLY"
-        POSTDISPLAY=""
-        _ASTER_MENU_INDEX=1
-        _ASTER_MENU_START=1
-        _ASTER_MENU_RESTORE_INDEX=1
-        _aster_menu_refresh
-        return
-      fi
-    fi
-    zle beep
-  }
-
   _aster_call_native_completion() {
     local widget="$1"
     _ASTER_IN_NATIVE_COMPLETION=1
@@ -1514,7 +1558,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       _ASTER_CAPTURE_FOREIGN_HIGHLIGHTS=1
       _aster_menu_render
     else
-      _aster_menu_clear
+      _aster_menu_clear 0 1
     fi
     _ASTER_MENU_BUFFER="$BUFFER"
     if [[ -n "$BUFFER" ]] && (( CURSOR == ${#BUFFER} )); then
@@ -1546,6 +1590,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     local index display
     local -a redraw_hooks apply_hooks
     local limit=$(( __ASTER_COMPLETION_MAX_CANDIDATES__ * 2 ))
+    (( _ASTER_GRID_ACTIVE )) && limit=__ASTER_PATH_GRID_CANDIDATES__
     _ASTER_MENU_ACCEPTS=()
     _ASTER_MENU_DISPLAYS=()
     _ASTER_MENU_DESCRIPTIONS=()
@@ -1828,6 +1873,11 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     local -a rendered_highlights
     if (( ${#_ASTER_MENU_ACCEPTS} == 0 )); then
       _ASTER_MENU_ACTIVE=0
+      if (( _ASTER_GRID_ACTIVE )); then
+        _ASTER_GRID_ACTIVE=0
+        _ASTER_MENU_REQUEST_BUFFER=""
+        _ASTER_NATIVE_REQUESTED=1
+      fi
       region_highlight=( "${_ASTER_FOREIGN_HIGHLIGHTS[@]}" )
       if (( _ASTER_FUZZY_ACTIVE )); then
         _aster_menu_render
@@ -1930,7 +1980,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
         _aster_menu_publish
       fi
     fi
-    if (( ! _ASTER_FUZZY_ACTIVE && ! _ASTER_NATIVE_REQUESTED )) &&
+    if (( ! _ASTER_FUZZY_ACTIVE && ! _ASTER_GRID_ACTIVE && ! _ASTER_NATIVE_REQUESTED )) &&
        [[ -n "$_ASTER_MENU_REQUEST_BUFFER" ]]; then
       (( _ASTER_NATIVE_START_TICKS++ ))
       if (( _ASTER_NATIVE_START_TICKS >= 2 )) && (( $+functions[_main_complete] )); then
@@ -1963,6 +2013,13 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
         --query "$_ASTER_FUZZY_QUERY" \
         --cwd "$cwd" \
         --format zsh-v3 2>/dev/null)
+    elif (( _ASTER_GRID_ACTIVE )); then
+      exec {query_fd}< <(print -rn -- "$buffer" | command aster complete \
+        --stdin \
+        --cursor "$cursor" \
+        --cwd "$cwd" \
+        --paths-only \
+        --format zsh-v3 2>/dev/null)
     else
       exec {query_fd}< <(print -rn -- "$buffer" | command aster complete \
         --stdin \
@@ -1978,6 +2035,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     _ASTER_FUZZY_ACTIVE=0
     _ASTER_FUZZY_BASE=""
     _ASTER_FUZZY_QUERY=""
+    _ASTER_GRID_ACTIVE=0
     POSTDISPLAY=""
     _ASTER_MENU_BUFFER="$BUFFER"
     _aster_menu_start_ticker
@@ -2065,11 +2123,6 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       return
     fi
     if (( _ASTER_MENU_ACTIVE && CURSOR == ${#BUFFER} )); then
-      if [[ "${_ASTER_MENU_KINDS[$_ASTER_MENU_INDEX]}" == file ||
-            "${_ASTER_MENU_KINDS[$_ASTER_MENU_INDEX]}" == directory ]]; then
-        _aster_path_accept
-        return
-      fi
       _aster_menu_accept segment
       return
     fi
@@ -2133,6 +2186,29 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     fi
   }
 
+  _aster_grid_toggle() {
+    if (( _ASTER_FUZZY_ACTIVE )); then
+      zle beep
+      return
+    fi
+    if (( _ASTER_GRID_ACTIVE )); then
+      _aster_menu_clear 1
+      _ASTER_MENU_BUFFER="$BUFFER"
+      [[ -n "$BUFFER" ]] && (( CURSOR == ${#BUFFER} )) && _aster_menu_schedule
+      zle -R
+      return
+    fi
+    if [[ -z "$BUFFER" ]] || (( CURSOR != ${#BUFFER} )); then
+      zle beep
+      return
+    fi
+    _aster_menu_clear 1
+    _ASTER_GRID_ACTIVE=1
+    _ASTER_MENU_BUFFER="$BUFFER"
+    _aster_menu_schedule
+    zle -R
+  }
+
   _aster_menu_up() {
     if (( _ASTER_MENU_ACTIVE )); then
       (( _ASTER_MENU_INDEX > 1 )) && (( _ASTER_MENU_INDEX-- ))
@@ -2156,6 +2232,10 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       [[ "$BUFFER" == *[![:space:]]* ]] && _aster_menu_schedule
       region_highlight=( "${_ASTER_FOREIGN_HIGHLIGHTS[@]}" )
       zle -R
+      return
+    fi
+    if (( _ASTER_GRID_ACTIVE )); then
+      _aster_grid_toggle
       return
     fi
     zle _aster-native-escape
@@ -2205,7 +2285,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
       _ASTER_FOREIGN_HIGHLIGHTS=()
     fi
     if [[ "$BUFFER" != "$_ASTER_MENU_BUFFER" ]]; then
-      _aster_menu_clear
+      _aster_menu_clear 0 1
       _ASTER_MENU_BUFFER="$BUFFER"
       [[ -n "$BUFFER" ]] && (( CURSOR == ${#BUFFER} )) && _aster_menu_schedule
     elif (( CURSOR != ${#BUFFER} )); then
@@ -2239,7 +2319,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     [[ -z "$_ASTER_PREVIOUS_TRIGGER" || "$_ASTER_PREVIOUS_TRIGGER" == "undefined-key" ]] && \
       _ASTER_PREVIOUS_TRIGGER=set-mark-command
     typeset -g _ASTER_PREVIOUS_DOWN="${$(bindkey '^N')##* }"
-    typeset -g _ASTER_PREVIOUS_UP="${$(bindkey '^K')##* }"
+    typeset -g _ASTER_PREVIOUS_UP="${$(bindkey '^P')##* }"
     typeset -g _ASTER_PREVIOUS_SHIFT_TAB="${$(bindkey '^[[Z')##* }"
     typeset -g _ASTER_PREVIOUS_ESCAPE="${$(bindkey '^[')##* }"
     typeset -g _ASTER_PREVIOUS_ENTER="${$(bindkey '^M')##* }"
@@ -2250,7 +2330,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     [[ -z "$_ASTER_PREVIOUS_DOWN" || "$_ASTER_PREVIOUS_DOWN" == "undefined-key" ]] && \
       _ASTER_PREVIOUS_DOWN=down-line-or-history
     [[ -z "$_ASTER_PREVIOUS_UP" || "$_ASTER_PREVIOUS_UP" == "undefined-key" ]] && \
-      _ASTER_PREVIOUS_UP=kill-line
+      _ASTER_PREVIOUS_UP=up-line-or-history
     [[ -z "$_ASTER_PREVIOUS_SHIFT_TAB" || "$_ASTER_PREVIOUS_SHIFT_TAB" == "undefined-key" ]] && \
       _ASTER_PREVIOUS_SHIFT_TAB=reverse-menu-complete
     [[ -z "$_ASTER_PREVIOUS_ESCAPE" ]] && _ASTER_PREVIOUS_ESCAPE=undefined-key
@@ -2291,6 +2371,14 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
     [[ -z "$_ASTER_PREVIOUS_TAB" || "$_ASTER_PREVIOUS_TAB" == "undefined-key" ]] && \
       _ASTER_PREVIOUS_TAB=expand-or-complete
     zle -A "$_ASTER_PREVIOUS_TAB" _aster-native-tab
+  fi
+  if [[ "${_ASTER_UP_BINDING:-}" != '^P' ]]; then
+    typeset -g _ASTER_PREVIOUS_UP="${$(bindkey '^P')##* }"
+    [[ -z "$_ASTER_PREVIOUS_UP" || "$_ASTER_PREVIOUS_UP" == "undefined-key" ||
+          "$_ASTER_PREVIOUS_UP" == aster-menu-up ]] && \
+      _ASTER_PREVIOUS_UP=up-line-or-history
+    zle -A "$_ASTER_PREVIOUS_UP" _aster-native-up
+    typeset -g _ASTER_UP_BINDING='^P'
   fi
   if [[ -z "${widgets[_aster-native-space]:-}" ]]; then
     if [[ -z "${_ASTER_PREVIOUS_SPACE:-}" || "$_ASTER_PREVIOUS_SPACE" == aster-space ]]; then
@@ -2336,6 +2424,7 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   zle -N aster-fuzzy-execute _aster_fuzzy_execute
   zle -N aster-menu-down _aster_menu_down
   zle -N aster-menu-up _aster_menu_up
+  zle -N aster-grid-toggle _aster_grid_toggle
   zle -N aster-shift-tab _aster_shift_tab
   zle -N aster-escape _aster_escape
   zle -N aster-history-up _aster_history_up
@@ -2353,7 +2442,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   zle -N aster-interrupt _aster_interrupt
   bindkey '__ASTER_COMPLETION_KEY__' aster-complete
   bindkey '^N' aster-menu-down
-  bindkey '^K' aster-menu-up
+  bindkey '^P' aster-menu-up
+  bindkey '^K' aster-grid-toggle
   bindkey '^[[Z' aster-shift-tab
   bindkey '^[' aster-escape
   bindkey '^[[A' aster-history-up
@@ -2369,7 +2459,8 @@ if [[ -o interactive ]] && (( $+commands[aster] )); then
   bindkey -M aster-fuzzy '^H' backward-delete-char
   bindkey -M aster-fuzzy '^I' aster-tab
   bindkey -M aster-fuzzy '^N' aster-menu-down
-  bindkey -M aster-fuzzy '^K' aster-menu-up
+  bindkey -M aster-fuzzy '^P' aster-menu-up
+  bindkey -M aster-fuzzy '^K' aster-grid-toggle
   bindkey -M aster-fuzzy '^[[A' aster-menu-up
   bindkey -M aster-fuzzy '^[OA' aster-menu-up
   bindkey -M aster-fuzzy '^[[B' aster-menu-down
@@ -2389,6 +2480,7 @@ fi
     .replace("__ASTER_UI_MENU_WIDTH__", &menu_width)
     .replace("__ASTER_UI_MAX_VISIBLE__", &max_visible)
     .replace("__ASTER_COMPLETION_MAX_CANDIDATES__", &max_candidates)
+    .replace("__ASTER_PATH_GRID_CANDIDATES__", &path_grid_candidates)
     .replace(
         "__ASTER_UI_PROMPT_OFFSET__",
         &settings.ui.prompt_offset.to_string(),

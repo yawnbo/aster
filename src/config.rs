@@ -167,7 +167,7 @@ pub fn completion_key_sequence(key: &str) -> Result<String> {
             if letter.len() != 1 || !letter.as_bytes()[0].is_ascii_lowercase() {
                 bail!("completion.key must be ctrl-space or ctrl-a through ctrl-z");
             }
-            if matches!(letter, "i" | "j" | "k" | "m" | "n") {
+            if matches!(letter, "i" | "j" | "k" | "m" | "n" | "p") {
                 bail!("completion.key conflicts with an Aster menu control");
             }
             Ok(format!("^{}", letter.to_ascii_uppercase()))
