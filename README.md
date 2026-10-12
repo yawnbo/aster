@@ -36,6 +36,21 @@ cargo install aster-completion
 Aster currently targets Unix systems because its shared transport is an
 owner-private Unix socket. Inline fuzzy mode requires `fzf` on the host.
 
+### Nix
+
+The flake exports `packages.<system>.aster` and a default package for ARM64 and
+x86-64 macOS and Linux. The build uses `package.nix` and the upstream `Cargo.lock`.
+
+```sh
+nix build .#aster
+./result/bin/aster --help
+```
+
+Enable Nix's `nix-command` and `flakes` features before running these commands.
+The first standalone build creates `flake.lock`; commit it to pin Nixpkgs for
+later builds. Other flakes can use Aster as an input and make its `nixpkgs` input
+follow their own. Shell integration and `fzf` remain the caller's responsibility.
+
 ## Zsh Setup
 
 Add one integration line to `.zshrc`:
