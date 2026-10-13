@@ -2104,7 +2104,8 @@ mod tests {
     #[test]
     fn description_process_has_a_hard_timeout() {
         let directory = tempdir().unwrap();
-        let mut command = Command::new("/bin/sleep");
+        // Nix's Linux sandbox provides sleep on PATH, not at /bin/sleep.
+        let mut command = Command::new("sleep");
         command.arg("2");
         let started = Instant::now();
 

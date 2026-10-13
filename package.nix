@@ -1,4 +1,4 @@
-{ lib, rustPlatform, src }:
+{ lib, rustPlatform, coreutils, src }:
 
 rustPlatform.buildRustPackage {
   pname = "aster-completion";
@@ -7,6 +7,7 @@ rustPlatform.buildRustPackage {
 
   # Fetch crates by their upstream lockfile checksums, without cargo install.
   cargoLock.lockFile = "${src}/Cargo.lock";
+  nativeCheckInputs = [ coreutils ];
   doCheck = true;
 
   meta = {
